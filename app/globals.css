@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+:root {
+  /* Soft background for the main canvas to contrast with white cards */
+  --bg-app: #f8fafc;
+  /* slate-50 */
+  --brand: #ea580c;
+  /* Orange 600 */
+  --brand-hover: #c2410c;
+  /* Orange 700 */
+}
+
+@theme {
+  --color-brand: var(--brand);
+  --color-bg-app: var(--bg-app);
+}
+
+body {
+  background-color: var(--bg-app);
+  @apply text-slate-900 antialiased selection:bg-brand selection:text-white;
+}
+
+/* Modern, minimal card design */
+.ui-card {
+  background-color: #ffffff;
+  border: 1px solid #e2e8f0;
+  /* slate-200 */
+  border-radius: 1.25rem;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.025);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
