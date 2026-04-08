@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import type { CSSProperties } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "sonner";
 import "./globals.css";
@@ -15,6 +16,7 @@ const geistMono = Geist_Mono({
 
 const appName = process.env.NEXT_PUBLIC_APP_NAME || "Restaurant Agent";
 const brandColor = process.env.NEXT_PUBLIC_BRAND_COLOR || "#EA580C";
+const rootStyle = { "--brand": brandColor } as CSSProperties & Record<"--brand", string>;
 
 export const metadata: Metadata = {
   title: `${appName} — Agent Dashboard`,
@@ -30,7 +32,7 @@ export default function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      style={{ "--brand": brandColor } as any}
+      style={rootStyle}
     >
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}

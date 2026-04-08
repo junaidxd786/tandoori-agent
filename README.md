@@ -1,15 +1,15 @@
 # Tandoori Restaurant — WhatsApp AI Agent
 
-Production-ready WhatsApp ordering assistant for **Tandoori Restaurant Wah (New City Phase 2)** built with Next.js 14+, Supabase, and OpenRouter AI.
+Production-grade WhatsApp ordering assistant for **Tandoori Restaurant Wah (New City Phase 2)** built with Next.js, Supabase, and OpenRouter AI.
 
 ## Features
 
-- 🤖 **AI Agent (Zaiqa)** — Handles full end-to-end ordering in WhatsApp (Urdu/English)
-- 📦 **Order Management** — Parses `__order__` JSON, stores to DB, manages status
+- 🤖 **Guided AI Assistant** — Uses AI for menu/help replies while backend code deterministically controls order state
+- 🧾 **Draft Order State Machine** — Persists cart, order type, address, dine-in details, and confirmation gates in the database
 - 💬 **Live Dashboard** — Real-time conversations + orders via Supabase Realtime
 - 🔄 **Human Takeover** — Toggle any conversation from AI agent to human mode
 - 📳 **Status Notifications** — Customers get WhatsApp messages when order status changes
-- 🛡️ **Deduplication** — Webhook is idempotent via `whatsapp_msg_id`
+- 🛡️ **Idempotent Ordering** — Orders are tied to the source WhatsApp confirmation message to prevent duplicate placement
 
 ## Tech Stack
 
@@ -49,10 +49,16 @@ cp .env.example .env.local
 
 ### 3. Database Schema
 
-Open **Supabase Dashboard → SQL Editor** and run the entire contents of:
+For a fresh database, run:
 
-```
+```sql
 supabase-schema.sql
+```
+
+For an existing database, run:
+
+```sql
+migrations.sql
 ```
 
 ### 4. Run Locally
@@ -87,12 +93,13 @@ https://your-ngrok-id.ngrok-free.app/api/webhook
 WhatsApp Message
   → POST /api/webhook
   → Store message in DB
-  → Fetch last 20 messages as context
-  → Call OpenRouter (GPT-4o-mini) with system prompt
-  → Parse __order__ JSON from AI reply
-  → Send clean reply to customer
-  → Write order to orders + order_items tables
-  → Store AI reply in messages table
+  → Persist message
+  → Acquire per-conversation lock
+  → Load persisted draft state + menu + settings
+  → Deterministically advance workflow
+  → Use AI only for safe fallback/help replies
+  → Place order only after backend validation
+  → Store assistant reply + order state
   → Dashboard updates in real-time via Supabase Realtime
 ```
 

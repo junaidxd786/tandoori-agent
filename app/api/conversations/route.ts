@@ -1,7 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
-// GET /api/conversations
 export async function GET() {
   const { data, error } = await supabaseAdmin
     .from("conversations")
@@ -13,6 +12,10 @@ export async function GET() {
       has_unread,
       updated_at,
       created_at,
+      conversation_states (
+        workflow_step,
+        order_type
+      ),
       messages (
         content,
         role,
@@ -27,5 +30,5 @@ export async function GET() {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json(data);
+  return NextResponse.json(data ?? []);
 }

@@ -2,16 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { sendWhatsAppMessage } from "@/lib/whatsapp";
 
+type ConversationPatchBody = {
+  mode?: "agent" | "human";
+  has_unread?: boolean;
+};
+
 // PATCH /api/conversations/[id] — update mode or has_unread
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const body = await req.json();
+  const body = (await req.json()) as ConversationPatchBody;
   const { mode, has_unread } = body;
 
-  const updates: any = {};
+  const updates: Record<string, boolean | "agent" | "human"> = {};
   if (mode !== undefined) {
     if (!["agent", "human"].includes(mode)) {
       return NextResponse.json({ error: "Invalid mode" }, { status: 400 });

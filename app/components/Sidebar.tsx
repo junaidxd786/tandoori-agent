@@ -31,7 +31,7 @@ export function Sidebar() {
 
   const playNotificationSound = () => {
     try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const AudioContextClass = window.AudioContext || ("webkitAudioContext" in window ? window.webkitAudioContext : undefined);
       if (!AudioContextClass) return;
       const ctx = new AudioContextClass();
       const osc = ctx.createOscillator();
@@ -50,13 +50,12 @@ export function Sidebar() {
 
       osc.start(ctx.currentTime);
       osc.stop(ctx.currentTime + 0.4);
-    } catch (e) {
-      console.error("Audio error", e);
+    } catch (error) {
+      console.error("Audio error", error);
     }
   };
 
   useEffect(() => {
-    let interval: NodeJS.Timeout;
     const checkNotifications = async () => {
       try {
         const res = await fetch("/api/conversations", {
@@ -92,12 +91,13 @@ export function Sidebar() {
           }
         }
         setGlobalUnreadCount(currentUnread);
-      } catch (err) {
+      } catch {
+        // Silent retry on next polling tick.
       }
     };
 
     checkNotifications();
-    interval = setInterval(checkNotifications, 4000);
+    const interval = setInterval(checkNotifications, 4000);
     return () => clearInterval(interval);
   }, []);
 

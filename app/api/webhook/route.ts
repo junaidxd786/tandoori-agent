@@ -1,12 +1,58 @@
-import { NextRequest, NextResponse } from "next/server";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { NextRequest } from "next/server";
+import { getCustomerSupportReply } from "@/lib/ai";
+import {
+  decideTurn,
+  getDefaultConversationState,
+  parseConversationState,
+  type ConversationState,
+  type PlaceableOrderPayload,
+  type RecentOrderContext,
+} from "@/lib/order-engine";
+import { getMenuCatalog, getMenuForAI } from "@/lib/menu";
+import { getRestaurantSettings, isWithinOperatingHours } from "@/lib/settings";
 import { supabaseAdmin } from "@/lib/supabase-admin";
-import { getAIReply, getCachedSettings } from "@/lib/ai";
 import { sendWhatsAppMessage } from "@/lib/whatsapp";
-import { getMenuForAI } from "@/lib/menu";
-import { updateRestaurantSettings, isWithinOperatingHours } from "@/lib/settings";
 
+type IncomingWhatsAppMessage = {
+  id: string;
+  from: string;
+  type: string;
+  timestamp: string;
+  text?: { body?: string };
+};
 
-// GET — Meta webhook verification
+type IncomingEnvelope = {
+  entry?: Array<{
+    changes?: Array<{
+      value?: {
+        contacts?: Array<{ profile?: { name?: string } }>;
+        messages?: IncomingWhatsAppMessage[];
+      };
+    }>;
+  }>;
+};
+
+type IncomingMessageEvent = {
+  message: IncomingWhatsAppMessage;
+  contactName: string;
+};
+
+type ConversationRow = {
+  id: string;
+  phone: string;
+  name: string | null;
+  mode: "agent" | "human";
+};
+
+type MessageRow = {
+  id: string;
+  ingest_seq: number;
+  content: string;
+  created_at: string;
+  whatsapp_msg_id: string | null;
+};
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const mode = searchParams.get("hub.mode");
@@ -20,383 +66,555 @@ export async function GET(req: NextRequest) {
   return new Response("Forbidden", { status: 403 });
 }
 
-// POST — Incoming messages from Meta
 export async function POST(req: NextRequest) {
-  let body: any;
+  let rawBody = "";
+  let body: unknown;
   try {
-    body = await req.json();
+    rawBody = await req.text();
+    if (!isValidWhatsAppSignature(rawBody, req.headers.get("x-hub-signature-256"))) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+    body = JSON.parse(rawBody) as unknown;
   } catch {
     return new Response("Bad Request", { status: 400 });
   }
 
-  // Always return 200 immediately to Meta
-  processWebhook(body).catch((err) =>
-    console.error("Webhook processing error:", err)
-  );
-
-  return new Response("OK", { status: 200 });
-}
-
-async function processWebhook(body: any) {
   try {
-    const entry = body?.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
-    const messages = value?.messages;
-    if (!messages || messages.length === 0) return;
-
-    const msg = messages[0];
-    const from: string = msg.from;
-    const whatsappMsgId: string = msg.id;
-    const msgType: string = msg.type;
-    const contactName: string = value?.contacts?.[0]?.profile?.name ?? from;
-
-    if (msgType !== "text") {
-      if (msgType !== "reaction") {
-        await sendWhatsAppMessage(from, "Assalam o Alaikum! 👋 Please send a text message for ordering.");
-      }
-      return;
-    }
-
-    const messageText: string = msg.text?.body ?? "";
-    const timestamp = new Date(parseInt(msg.timestamp) * 1000).toISOString();
-
-    // 1. Get/Create Conversation — retry once on transient socket errors
-    let conversation: any = null;
-    let convError: any = null;
-
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const result = await supabaseAdmin
-        .from("conversations")
-        .upsert(
-          { phone: from, name: contactName, has_unread: true, updated_at: new Date().toISOString() },
-          { onConflict: "phone" }
-        )
-        .select()
-        .single();
-
-      convError = result.error;
-      conversation = result.data;
-
-      if (!convError) break; // success
-
-      const isSocketError =
-        convError.message?.includes("fetch failed") ||
-        convError.message?.includes("UND_ERR") ||
-        convError.details?.includes("fetch failed");
-
-      if (isSocketError && attempt < 2) {
-        console.warn(`[Webhook] Supabase socket error on attempt ${attempt}, retrying…`, convError.message);
-        await new Promise((r) => setTimeout(r, 300)); // brief pause before retry
-        continue;
-      }
-
-      // Real error or retries exhausted
-      break;
-    }
-
-    if (convError || !conversation || conversation.mode === "human") {
-      console.log("Webhook aborted: convError, no conversation, or mode=human", { convError, mode: conversation?.mode });
-      return;
-    }
-
-
-    // 2. Save User Message (unique on whatsapp_msg_id to prevent replays)
-    const { error: msgError } = await supabaseAdmin.from("messages").insert({
-      conversation_id: conversation.id,
-      role: "user",
-      content: messageText,
-      whatsapp_msg_id: whatsappMsgId,
-      created_at: timestamp,
-    });
-    if (msgError) {
-      console.log("Webhook aborted: msgError (likely deduplication)", msgError);
-      return;
-    }
-
-    console.log("Fetching AI Reply...");
-    // 3. Fetch History + menu + recent orders
-    // Run the two Supabase queries sequentially to avoid exhausting the free-tier connection pool.
-    // Menu is fetched in parallel since it uses its own in-memory cache (no extra DB connection).
-    const sessionStart = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
-
-    const [menuString, { data: historyRows }, { data: recentOrders }] = await Promise.all([
-      getMenuForAI(), // cached — safe to run in parallel
-      supabaseAdmin
-        .from("messages")
-        .select("role, content, whatsapp_msg_id")
-        .eq("conversation_id", conversation.id)
-        .gte("created_at", sessionStart)
-        .order("created_at", { ascending: false })
-        .limit(30),
-      supabaseAdmin
-        .from("orders")
-        .select("id, subtotal, type, status, created_at")
-        .eq("conversation_id", conversation.id)
-        .order("created_at", { ascending: false })
-        .limit(1),
-    ]);
-
-    // Reverse history to maintain chronological order for the AI
-    const history = (historyRows ?? []).reverse().map((r) => ({ role: r.role, content: r.content }));
-
-
-    // 3b. Fetch settings (cached for 5 min) & auto-toggle is_accepting_orders based on clock
-    const settings = await getCachedSettings();
-    const withinHours = isWithinOperatingHours(settings.opening_time, settings.closing_time);
-    const isOpenNow = settings.is_accepting_orders && withinHours;
-
-    // Auto-toggle: keep the DB flag in sync with the clock
-    if (withinHours && !settings.is_accepting_orders) {
-      // Clock says open, but flag is off → turn it on automatically
-      await updateRestaurantSettings({ is_accepting_orders: true }).catch((e) => console.error("[Auto-toggle] Failed to update settings:", e));
-      console.log("[Auto-toggle] Restaurant opened — is_accepting_orders set to TRUE");
-    } else if (!withinHours && settings.is_accepting_orders) {
-      // Clock says closed, but flag is still on → turn it off automatically
-      await updateRestaurantSettings({ is_accepting_orders: false }).catch((e) => console.error("[Auto-toggle] Failed to update settings:", e));
-      console.log("[Auto-toggle] Restaurant closed — is_accepting_orders set to FALSE");
-    }
-
-    // 4. Inject recent order context into the AI so it knows the order state
-    //    This prevents the AI from placing the order again after confirmation
-    const recentOrder = recentOrders?.[0];
-    const recentOrderMinutesAgo = recentOrder
-      ? (Date.now() - new Date(recentOrder.created_at).getTime()) / 60000
-      : null;
-
-    const orderContext =
-      recentOrder && recentOrderMinutesAgo !== null && recentOrderMinutesAgo < 180
-        ? `[SYSTEM: An order (subtotal Rs.${recentOrder.subtotal}, type: ${recentOrder.type}, status: ${recentOrder.status}) was ALREADY PLACED for this conversation ${Math.round(recentOrderMinutesAgo)} minute(s) ago. DO NOT call place_order again for the same order. If the user asks about their order, confirm it has been placed and give them the query phone number. Only place a NEW order if the user explicitly requests one.]`
-        : null;
-
-    // 5. Get AI Reply (with Tool Calling) — pass isOpenNow so AI cannot hallucinate open/closed
-    const hasHistory = (historyRows ?? []).some(r => r.role === "assistant");
-    const aiResponse = await getAIReply(history, menuString ?? undefined, orderContext, isOpenNow, hasHistory, settings);
-
-    // 5b. Race Condition Prevention
-    // If the user sent a new message while the AI was generating this reply,
-    // abort this execution. The newest webhook will reply with the combined context.
-    // Optimised: fetch only the latest user message ID (1 row, minimal payload).
-    const knownUserMsgIds = new Set(
-      (historyRows ?? [])
-        .filter((r) => r.role === "user" && r.whatsapp_msg_id)
-        .map((r) => r.whatsapp_msg_id)
-    );
-
-    const { data: latestUserMsg } = await supabaseAdmin
-      .from("messages")
-      .select("whatsapp_msg_id")
-      .eq("conversation_id", conversation.id)
-      .eq("role", "user")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const hasNewerMessage =
-      latestUserMsg?.whatsapp_msg_id != null &&
-      !knownUserMsgIds.has(latestUserMsg.whatsapp_msg_id);
-
-    if (hasNewerMessage) {
-      console.log("Abort AI response. A newer message arrived while processing.");
-      return;
-    }
-
-    // 6. Handle Tool Calls — with strict deduplication guard
-    const deliveryPhone = process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "";
-    let orderWasJustPlaced = false;
-
-    if (aiResponse.tool_calls) {
-      for (const tool of aiResponse.tool_calls) {
-        if (tool.function.name === "place_order") {
-          // Guard: Prevent placing a duplicate order within the last 5 minutes
-          const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-          const { data: veryRecentOrder } = await supabaseAdmin
-            .from("orders")
-            .select("id")
-            .eq("conversation_id", conversation.id)
-            .gte("created_at", fiveMinutesAgo)
-            .maybeSingle();
-
-          if (veryRecentOrder) {
-            console.log("⛔ Duplicate order PREVENTED — order already placed within 5 mins:", veryRecentOrder.id);
-          } else {
-            const args = JSON.parse(tool.function.arguments);
-            try {
-              await handlePlaceOrder(conversation.id, args);
-              orderWasJustPlaced = true;
-              console.log("✅ Order placed successfully for conversation:", conversation.id);
-            } catch (orderErr: any) {
-              console.error("handlePlaceOrder failed:", orderErr.message);
-              aiResponse.content = `Sorry, we couldn't process your order — one of the items may have been removed from our menu. Please check the menu and try again, or call ${deliveryPhone}.`;
-            }
-          }
-        }
-      }
-    }
-
-    // 7. Determine the final reply content
-    //    CRITICAL: If the AI placed an order but returned no text (empty content),
-    //    inject a hardcoded confirmation so the history stays complete.
-    //    An incomplete history is the ROOT CAUSE of duplicate orders on follow-up messages.
-    let finalContent = aiResponse.content?.trim() || null;
-    if (orderWasJustPlaced && !finalContent) {
-      finalContent = `✅ Your order has been placed! We'll be with you shortly. For queries call ${deliveryPhone}`;
-    }
-
-    // 8. Send reply to WhatsApp & persist to DB
-    if (finalContent) {
-      finalContent = await validatePricesInResponse(finalContent, deliveryPhone);
-      await sendWhatsAppMessage(from, finalContent);
-      await supabaseAdmin.from("messages").insert({
-        conversation_id: conversation.id,
-        role: "assistant",
-        content: finalContent,
-      });
-    }
-
-    // NOTE: No separate timestamp update needed — the upsert in step 1 already
-    // wrote updated_at + has_unread:true, saving one DB round-trip per message.
-
-  } catch (err) {
-    console.error("processWebhook error:", err);
-
-    // Recovery Phase: Try to gracefully notify the user if possible
-    try {
-      const entry = body?.entry?.[0];
-      const change = entry?.changes?.[0];
-      const value = change?.value;
-      const messages = value?.messages;
-      if (messages && messages.length > 0) {
-        const from = messages[0].from;
-        if (from) {
-          console.log("Sending fallback message to", from);
-          const fallbackPhone = process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "our support line";
-          const fallbackContent = `⚠️ Mujhay kuch technical masla aa raha hai (System busy). Baraye meharbani thodi der baad try karein ya call karein: ${fallbackPhone}.`;
-
-          await sendWhatsAppMessage(from, fallbackContent);
-
-          // ── Persist fallback message to DB so dashboard shows it ──────────
-          const { data: conv } = await supabaseAdmin
-            .from("conversations")
-            .select("id")
-            .eq("phone", from)
-            .maybeSingle();
-
-          if (conv?.id) {
-            const { error: insertErr } = await supabaseAdmin.from("messages").insert({
-              conversation_id: conv.id,
-              role: "assistant",
-              content: fallbackContent,
-            });
-            if (insertErr) console.error("Failed to persist fallback message:", insertErr);
-          }
-        }
-      }
-    } catch (fallbackErr) {
-      console.error("Fallback handler also failed:", fallbackErr);
-    }
+    await processWebhook(body);
+    return new Response("OK", { status: 200 });
+  } catch (error) {
+    console.error("[webhook] Processing failed:", error);
+    return new Response("Retry", { status: 500 });
   }
 }
 
-/**
- * Tool Handler: place_order
- */
-async function handlePlaceOrder(conversationId: string, args: any) {
-  // 0. Fetch authoritative settings for delivery fee
-  const { getRestaurantSettings } = await import("@/lib/settings");
-  const settings = await getRestaurantSettings();
+async function processWebhook(body: unknown) {
+  const events = extractIncomingMessages(body);
+  if (events.length === 0) return;
 
-  // delivery_enabled = true  → charge the configured fee
-  // delivery_enabled = false → free delivery (fee = 0)
-  // Delivery orders are ALWAYS accepted either way.
-  const authorizedDeliveryFee = args.type === "delivery" && settings.delivery_enabled && settings.delivery_fee > 0
-    ? Number(settings.delivery_fee)
-    : 0;
+  const agentConversations = new Map<string, ConversationRow>();
 
-  // 1. Fetch available menu items for price validation
-  const { data: menuItems } = await supabaseAdmin
-    .from("menu_items")
-    .select("name, price")
-    .eq("is_available", true);
+  for (const event of events) {
+    const { message, contactName } = event;
+    const conversation = await upsertConversation(message.from, contactName);
+    const state = await getOrCreateConversationState(conversation.id);
 
-  let validatedSubtotal = 0;
-  const validatedItems = (args.items || []).map((item: any) => {
-    // 1. Try exact (lowercase)
-    let dbItem = (menuItems || []).find(m => m.name.toLowerCase() === item.name.toLowerCase());
-    
-    // 2. Try fuzzy: match if it significantly overlaps
-    if (!dbItem) {
-      const candidates = (menuItems || []).filter(m => 
-        m.name.toLowerCase().includes(item.name.toLowerCase()) || 
-        item.name.toLowerCase().includes(m.name.toLowerCase())
-      );
-      
-      if (candidates.length > 0) {
-        // Find the shortest match or the one that starts with the same word
-        dbItem = candidates.reduce((a, b) => a.name.length < b.name.length ? a : b);
+    if (message.type !== "text") {
+      if (message.type !== "reaction") {
+        await sendAndPersistAssistantMessage(
+          conversation.id,
+          message.from,
+          state.preferred_language === "roman_urdu"
+            ? "Please text message bhej dein, main menu aur order mein help kar deta hoon."
+            : "Please send a text message and I'll help you with the menu or your order.",
+        );
+      }
+      await markMessageProcessed(state, message.id, toIsoTimestamp(message.timestamp), null);
+      continue;
+    }
+
+    const content = (message.text?.body || "").trim();
+    const createdAt = toIsoTimestamp(message.timestamp);
+    const persistedMessage = await persistUserMessage(conversation.id, content, message.id, createdAt);
+
+    if (conversation.mode === "human") {
+      await markMessageProcessed(state, message.id, createdAt, persistedMessage?.ingest_seq ?? null);
+      continue;
+    }
+
+    agentConversations.set(conversation.id, conversation);
+  }
+
+  for (const conversation of agentConversations.values()) {
+    await drainConversationQueue(conversation);
+  }
+}
+
+function extractIncomingMessages(body: unknown): IncomingMessageEvent[] {
+  const payload = body as IncomingEnvelope;
+  const events: IncomingMessageEvent[] = [];
+
+  for (const entry of payload.entry ?? []) {
+    for (const change of entry.changes ?? []) {
+      const contactName = change.value?.contacts?.[0]?.profile?.name;
+      for (const message of change.value?.messages ?? []) {
+        events.push({
+          message,
+          contactName: contactName ?? message.from,
+        });
       }
     }
+  }
 
-    // 3. Strict guard: MUST found in DB
-    if (!dbItem) {
-      throw new Error(`AI attempted to order an item not found in the database: ${item.name}`);
+  return events;
+}
+
+async function upsertConversation(phone: string, name: string): Promise<ConversationRow> {
+  const { data, error } = await supabaseAdmin
+    .from("conversations")
+    .upsert(
+      {
+        phone,
+        name,
+        has_unread: true,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "phone" },
+    )
+    .select("id, phone, name, mode")
+    .single();
+
+  if (error || !data) {
+    throw error ?? new Error("Failed to upsert conversation.");
+  }
+
+  return data;
+}
+
+async function getOrCreateConversationState(conversationId: string): Promise<ConversationState> {
+  const { data, error } = await supabaseAdmin
+    .from("conversation_states")
+    .select("*")
+    .eq("conversation_id", conversationId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  if (data) {
+    return parseConversationState(data as ConversationState);
+  }
+
+  const defaults = getDefaultConversationState(conversationId);
+  const { data: inserted, error: insertError } = await supabaseAdmin
+    .from("conversation_states")
+    .insert(defaults)
+    .select("*")
+    .single();
+
+  if (insertError || !inserted) {
+    throw insertError ?? new Error("Failed to create conversation state.");
+  }
+
+  return parseConversationState(inserted as ConversationState);
+}
+
+async function persistUserMessage(
+  conversationId: string,
+  content: string,
+  whatsappMessageId: string,
+  createdAt: string,
+) {
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .insert({
+      conversation_id: conversationId,
+      role: "user",
+      content,
+      whatsapp_msg_id: whatsappMessageId,
+      created_at: createdAt,
+    })
+    .select("id, ingest_seq, content, created_at, whatsapp_msg_id")
+    .maybeSingle();
+
+  if (!error) {
+    return data
+      ? {
+          id: data.id,
+          ingest_seq: data.ingest_seq,
+          content: data.content,
+          created_at: data.created_at,
+          whatsapp_msg_id: data.whatsapp_msg_id,
+        }
+      : null;
+  }
+
+  if (String(error.code) !== "23505") {
+    throw error;
+  }
+
+  const { data: existing, error: existingError } = await supabaseAdmin
+    .from("messages")
+    .select("id, ingest_seq, content, created_at, whatsapp_msg_id")
+    .eq("conversation_id", conversationId)
+    .eq("whatsapp_msg_id", whatsappMessageId)
+    .maybeSingle();
+
+  if (existingError) {
+    throw existingError;
+  }
+
+  return existing
+    ? {
+        id: existing.id,
+        ingest_seq: existing.ingest_seq,
+        content: existing.content,
+        created_at: existing.created_at,
+        whatsapp_msg_id: existing.whatsapp_msg_id,
+      }
+    : null;
+}
+
+async function drainConversationQueue(conversation: ConversationRow) {
+  const token = await acquireConversationLock(conversation.id);
+  if (!token) {
+    throw new Error(`Could not acquire conversation lock for ${conversation.id}`);
+  }
+
+  try {
+    const settings = await getRestaurantSettings();
+    const isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
+    const menuItems = await getMenuCatalog();
+    const menuForAI = await getMenuForAI();
+
+    while (true) {
+      const state = await getOrCreateConversationState(conversation.id);
+      const nextMessage = await getNextPendingUserMessage(
+        conversation.id,
+        state.last_processed_message_seq,
+      );
+      if (!nextMessage) break;
+
+      const recentOrder = await getRecentOrderContext(conversation.id);
+      const decision = decideTurn({
+        messageText: nextMessage.content,
+        state,
+        menuItems,
+        settings,
+        isOpenNow,
+        recentOrder,
+      });
+      const updatedState: Partial<ConversationState> = decision.statePatch ?? {};
+
+      try {
+        let reply = "";
+
+        if (decision.kind === "fallback") {
+          const history = await getConversationHistoryUpTo(conversation.id, nextMessage.created_at);
+          reply = await getCustomerSupportReply(
+            history,
+            menuForAI,
+            isOpenNow,
+            history.some((entry) => entry.role === "assistant"),
+            settings,
+            (decision.statePatch?.preferred_language ?? state.preferred_language) || "english",
+          );
+        } else {
+          reply = decision.reply;
+        }
+
+        if (decision.kind === "place_order") {
+          await createOrderFromPayload(conversation.id, nextMessage.whatsapp_msg_id, decision.order, settings);
+        }
+
+        await sendAndPersistAssistantMessage(conversation.id, conversation.phone, reply);
+        await updateConversationState(state, {
+          ...updatedState,
+          last_processed_user_message_id: nextMessage.whatsapp_msg_id,
+          last_processed_message_seq: nextMessage.ingest_seq,
+          last_processed_user_message_at: nextMessage.created_at,
+          last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
+          last_error: null,
+        });
+      } catch (error) {
+        const replyLanguage =
+          (updatedState.preferred_language ?? state.preferred_language) === "roman_urdu" ? "roman_urdu" : "english";
+        const fallback =
+          replyLanguage === "roman_urdu"
+            ? "Maazrat, system is waqt thora busy hai. Thori dair mein dubara message bhej dein ya urgent help ke liye call karein."
+            : "I'm sorry, the system is a little busy right now. Please send your message again in a moment or call us for urgent help.";
+        await sendAndPersistAssistantMessage(conversation.id, conversation.phone, fallback);
+        await updateConversationState(state, {
+          last_processed_user_message_id: nextMessage.whatsapp_msg_id,
+          last_processed_message_seq: nextMessage.ingest_seq,
+          last_processed_user_message_at: nextMessage.created_at,
+          last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
+          last_error: error instanceof Error ? error.message : "Unknown processing error",
+        });
+      }
+    }
+  } finally {
+    await releaseConversationLock(conversation.id, token);
+  }
+}
+
+async function getNextPendingUserMessage(
+  conversationId: string,
+  lastProcessedMessageSeq: number | null,
+): Promise<MessageRow | null> {
+  let query = supabaseAdmin
+    .from("messages")
+    .select("id, ingest_seq, content, created_at, whatsapp_msg_id")
+    .eq("conversation_id", conversationId)
+    .eq("role", "user")
+    .order("ingest_seq", { ascending: true })
+    .limit(1);
+
+  if (lastProcessedMessageSeq != null) {
+    query = query.gt("ingest_seq", lastProcessedMessageSeq);
+  }
+
+  const { data, error } = await query.maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+
+  return {
+    id: data.id,
+    ingest_seq: data.ingest_seq,
+    content: data.content,
+    created_at: data.created_at,
+    whatsapp_msg_id: data.whatsapp_msg_id,
+  };
+}
+
+async function getConversationHistoryUpTo(conversationId: string, createdAt: string) {
+  const { data, error } = await supabaseAdmin
+    .from("messages")
+    .select("role, content, created_at")
+    .eq("conversation_id", conversationId)
+    .lte("created_at", createdAt)
+    .order("created_at", { ascending: false })
+    .limit(20);
+
+  if (error) throw error;
+  return (data ?? []).reverse().map((row) => ({
+    role: row.role,
+    content: row.content,
+  }));
+}
+
+async function getRecentOrderContext(conversationId: string): Promise<RecentOrderContext | null> {
+  const { data, error } = await supabaseAdmin
+    .from("orders")
+    .select("order_number, status, type, created_at")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  return {
+    order_number: data.order_number,
+    status: data.status,
+    type: data.type,
+    created_at: data.created_at,
+  };
+}
+
+async function sendAndPersistAssistantMessage(conversationId: string, phone: string, content: string) {
+  await sendWhatsAppMessage(phone, content);
+
+  const { error } = await supabaseAdmin.from("messages").insert({
+    conversation_id: conversationId,
+    role: "assistant",
+    content,
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function markMessageProcessed(
+  state: ConversationState,
+  whatsappMessageId: string,
+  createdAt: string,
+  ingestSeq: number | null,
+) {
+  await updateConversationState(state, {
+    last_processed_user_message_id: whatsappMessageId,
+    ...(ingestSeq != null ? { last_processed_message_seq: ingestSeq } : {}),
+    last_processed_user_message_at: createdAt,
+    last_user_whatsapp_msg_id: whatsappMessageId,
+    last_error: null,
+  });
+}
+
+async function updateConversationState(state: ConversationState, patch: Partial<ConversationState>) {
+  const nextState = {
+    ...state,
+    ...patch,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabaseAdmin
+    .from("conversation_states")
+    .update(nextState)
+    .eq("conversation_id", state.conversation_id);
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function acquireConversationLock(conversationId: string): Promise<string | null> {
+  const token = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const staleBefore = new Date(Date.now() - 90 * 1000).toISOString();
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const { data: unlockedRow, error: unlockedError } = await supabaseAdmin
+      .from("conversation_states")
+      .update({
+        processing_token: token,
+        processing_started_at: now,
+      })
+      .eq("conversation_id", conversationId)
+      .is("processing_token", null)
+      .select("conversation_id")
+      .maybeSingle();
+
+    if (unlockedError) throw unlockedError;
+    if (unlockedRow) return token;
+
+    const { data: staleRow, error: staleError } = await supabaseAdmin
+      .from("conversation_states")
+      .update({
+        processing_token: token,
+        processing_started_at: now,
+      })
+      .eq("conversation_id", conversationId)
+      .lt("processing_started_at", staleBefore)
+      .select("conversation_id")
+      .maybeSingle();
+
+    if (staleError) throw staleError;
+    if (staleRow) return token;
+
+    await sleep(150 * (attempt + 1));
+  }
+
+  return null;
+}
+
+async function releaseConversationLock(conversationId: string, token: string) {
+  const { error } = await supabaseAdmin
+    .from("conversation_states")
+    .update({
+      processing_token: null,
+      processing_started_at: null,
+    })
+    .eq("conversation_id", conversationId)
+    .eq("processing_token", token);
+
+  if (error) {
+    console.error("[webhook] Failed to release lock:", error);
+  }
+}
+
+async function createOrderFromPayload(
+  conversationId: string,
+  sourceUserMessageId: string | null,
+  payload: PlaceableOrderPayload,
+  settings: Awaited<ReturnType<typeof getRestaurantSettings>>,
+) {
+  if (!sourceUserMessageId) {
+    throw new Error("Missing source user message id for order placement.");
+  }
+
+  const { data: existingOrder } = await supabaseAdmin
+    .from("orders")
+    .select("id")
+    .eq("source_user_message_id", sourceUserMessageId)
+    .maybeSingle();
+
+  if (existingOrder) return existingOrder;
+
+  const { data: menuRows, error: menuError } = await supabaseAdmin
+    .from("menu_items")
+    .select("name, price, category")
+    .eq("is_available", true);
+
+  if (menuError) throw menuError;
+
+  const validatedItems = payload.items.map((item) => {
+    const match = (menuRows ?? []).find((row) => row.name.toLowerCase() === item.name.toLowerCase());
+    if (!match) {
+      throw new Error(`Menu item no longer exists: ${item.name}`);
     }
 
-    const finalPrice = Number(dbItem.price);
-    validatedSubtotal += finalPrice * item.qty;
-    
     return {
-      name: dbItem.name,
+      name: match.name,
       qty: item.qty,
-      price: finalPrice,
+      price: Number(match.price),
+      category: match.category ?? null,
     };
   });
+
+  const subtotal = validatedItems.reduce((total, item) => total + item.price * item.qty, 0);
+  const deliveryFee =
+    payload.type === "delivery" && settings.delivery_enabled && settings.delivery_fee > 0
+      ? Number(settings.delivery_fee)
+      : 0;
 
   const { data: order, error: orderError } = await supabaseAdmin
     .from("orders")
     .insert({
       conversation_id: conversationId,
-      type: args.type,
-      subtotal: validatedSubtotal,
-      delivery_fee: authorizedDeliveryFee,
-      address: args.address || null,
-      guests: args.guests || null,
-      reservation_time: args.time || null,
+      source_user_message_id: sourceUserMessageId,
+      type: payload.type,
+      subtotal,
+      delivery_fee: deliveryFee,
+      address: payload.type === "delivery" ? payload.address : null,
+      guests: payload.type === "dine-in" ? payload.guests : null,
+      reservation_time: payload.type === "dine-in" ? payload.reservation_time : null,
       status: "received",
     })
-    .select().single();
+    .select("id")
+    .single();
 
   if (orderError || !order) {
-    throw new Error("Failed to create order record.");
+    throw orderError ?? new Error("Failed to create order.");
   }
 
-  if (validatedItems.length > 0) {
-    const { error: itemsError } = await supabaseAdmin.from("order_items").insert(
-      validatedItems.map((item: any) => ({
-        order_id: order.id,
-        name: item.name,
-        qty: item.qty,
-        price: item.price,
-      }))
-    );
+  const { error: itemsError } = await supabaseAdmin.from("order_items").insert(
+    validatedItems.map((item) => ({
+      order_id: order.id,
+      name: item.name,
+      qty: item.qty,
+      price: item.price,
+    })),
+  );
 
-    if (itemsError) {
-      await supabaseAdmin.from("orders").delete().eq("id", order.id);
-      throw new Error("Failed to save order items — order rolled back.");
-    }
+  if (itemsError) {
+    await supabaseAdmin.from("orders").delete().eq("id", order.id);
+    throw itemsError;
   }
+
+  return order;
 }
 
-/**
- * Price Hallucination Backstop: Ensures every price mentioned by the AI exists in the DB
- */
-async function validatePricesInResponse(
-  content: string,
-  fallbackPhone: string
-): Promise<string> {
-  // Disabling strict checking because it falsely blocks valid math (e.g. valid Subtotals)
-  // when the subtotal sum does not equal a single item's price.
-  return content;
+function toIsoTimestamp(timestamp: string): string {
+  return new Date(Number.parseInt(timestamp, 10) * 1000).toISOString();
 }
 
+function isValidWhatsAppSignature(rawBody: string, signatureHeader: string | null): boolean {
+  const appSecret = process.env.WHATSAPP_APP_SECRET || process.env.META_APP_SECRET;
+  if (!appSecret) {
+    console.error("[webhook] Missing WHATSAPP_APP_SECRET for signature validation.");
+    return false;
+  }
 
+  if (!signatureHeader?.startsWith("sha256=")) {
+    console.error("[webhook] Missing x-hub-signature-256 header.");
+    return false;
+  }
+
+  const expected = `sha256=${createHmac("sha256", appSecret).update(rawBody).digest("hex")}`;
+  const received = signatureHeader.trim();
+  const expectedBuffer = Buffer.from(expected);
+  const receivedBuffer = Buffer.from(received);
+
+  if (expectedBuffer.length !== receivedBuffer.length) {
+    return false;
+  }
+
+  return timingSafeEqual(expectedBuffer, receivedBuffer);
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}

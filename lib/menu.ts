@@ -1,92 +1,103 @@
+import { getCached, invalidateCache, setCached } from "./cache";
 import { supabaseAdmin } from "./supabase-admin";
-import { invalidateCacheByPrefix } from "./cache";
 
 export type MenuItem = {
   id?: string;
   name: string;
   price: number;
-  category?: string;
-  description?: string;
+  category?: string | null;
+  description?: string | null;
   is_available?: boolean;
 };
 
-let _cachedMenu: { data: string; expires: number } | null = null;
-const MENU_CACHE_TTL = 60 * 1000; // 60 seconds
+export type MenuCatalogItem = {
+  id: string;
+  name: string;
+  price: number;
+  category: string | null;
+  is_available: boolean;
+};
 
-/**
- * Fetch all available menu items and format them for the AI context window.
- *
- * Format chosen deliberately:
- *   ### Category
- *     • Item Name — Rs. 850
- *
- * The bullet + em-dash (—) separator is visually distinctive and unambiguous.
- * The model cannot confuse "—" with a price range or a colon-separated key/value.
- *
- * Uses a short in-memory cache to prevent multiple DB queries when users
- * send rapid sequential messages.
- */
-export async function getMenuForAI(): Promise<string | null> {
-  const now = Date.now();
-  if (_cachedMenu && _cachedMenu.expires > now) {
-    return _cachedMenu.data;
-  }
+const MENU_CATALOG_CACHE_KEY = "menu_catalog";
+const MENU_AI_CACHE_KEY = "menu_ai";
+const MENU_CACHE_TTL_MS = 30 * 1000;
+
+function formatMenuForAI(items: MenuCatalogItem[]): string | null {
+  if (items.length === 0) return null;
+
+  const grouped = items.reduce<Record<string, string[]>>((accumulator, item) => {
+    const category = item.category?.trim() || "General";
+    if (!accumulator[category]) accumulator[category] = [];
+    accumulator[category].push(`- ${item.name} - Rs. ${Number(item.price)}`);
+    return accumulator;
+  }, {});
+
+  return Object.entries(grouped)
+    .map(([category, lines]) => `### ${category}\n${lines.join("\n")}`)
+    .join("\n\n");
+}
+
+export async function getMenuCatalog(): Promise<MenuCatalogItem[]> {
+  const cached = getCached<MenuCatalogItem[]>(MENU_CATALOG_CACHE_KEY);
+  if (cached) return cached;
 
   const { data, error } = await supabaseAdmin
     .from("menu_items")
-    .select("name, price, category")
+    .select("id, name, price, category, is_available")
     .eq("is_available", true)
     .order("category", { ascending: true })
     .order("name", { ascending: true });
 
-  if (error) {
-    console.error("[getMenuForAI] Supabase error:", error);
-    return null;
+  if (error || !data) {
+    console.error("[getMenuCatalog] Failed to load menu:", error);
+    return [];
   }
 
-  if (!data || data.length === 0) return null;
+  const items = data.map((item) => ({
+    id: item.id,
+    name: item.name,
+    price: Number(item.price),
+    category: item.category ?? null,
+    is_available: item.is_available ?? true,
+  }));
 
-  const grouped = data.reduce((acc: Record<string, string[]>, item) => {
-    const cat = item.category?.trim() || "General";
-    if (!acc[cat]) acc[cat] = [];
-    // Rs. value stored as numeric — ensure no floating-point artefacts (e.g. 850.00 → 850)
-    const price = Number.isInteger(item.price)
-      ? item.price
-      : parseFloat(item.price.toFixed(2));
-    acc[cat].push(`  • ${item.name} — Rs. ${price}`);
-    return acc;
-  }, {});
-
-  const lines = Object.entries(grouped).map(
-    ([cat, items]) => `### ${cat}\n${items.join("\n")}`
-  );
-
-  const result = lines.join("\n\n");
-  _cachedMenu = { data: result, expires: now + MENU_CACHE_TTL };
-  return result;
+  setCached(MENU_CATALOG_CACHE_KEY, items, MENU_CACHE_TTL_MS);
+  return items;
 }
 
-/**
- * Replace the entire menu_items table with a new set of items.
- * Called after a successful image extraction in the dashboard.
- */
+export async function getMenuForAI(): Promise<string | null> {
+  const cached = getCached<string>(MENU_AI_CACHE_KEY);
+  if (cached) return cached;
+
+  const items = await getMenuCatalog();
+  const formatted = formatMenuForAI(items);
+  if (formatted) {
+    setCached(MENU_AI_CACHE_KEY, formatted, MENU_CACHE_TTL_MS);
+  }
+  return formatted;
+}
+
+export function invalidateMenuCache(): void {
+  invalidateCache(MENU_CATALOG_CACHE_KEY);
+  invalidateCache(MENU_AI_CACHE_KEY);
+}
+
 export async function updateMenuFromExtraction(items: MenuItem[]) {
-  // Delete all rows (the neq trick avoids a missing WHERE clause error in Supabase)
-  const { error: deleteError } = await supabaseAdmin
-    .from("menu_items")
-    .delete()
-    .neq("id", "00000000-0000-0000-0000-000000000000");
+  const payload = items.map((item, index) => ({
+    name: item.name,
+    price: Number(item.price),
+    category: item.category ?? null,
+    description: item.description ?? null,
+    is_available: item.is_available ?? true,
+    sort_order: index,
+  }));
 
-  if (deleteError) throw deleteError;
+  const { error } = await supabaseAdmin.rpc("replace_menu_items", {
+    menu_payload: payload,
+  });
+  if (error) throw error;
 
-  const { error: insertError } = await supabaseAdmin
-    .from("menu_items")
-    .insert(items);
-
-  if (insertError) throw insertError;
-
-  // Bust any application-level caches keyed on "menu_"
-  invalidateCacheByPrefix("menu_");
+  invalidateMenuCache();
 }
 
 export async function createMenuUpload(imageUrl: string) {
@@ -103,7 +114,7 @@ export async function createMenuUpload(imageUrl: string) {
 export async function updateMenuUploadStatus(
   id: string,
   status: "processing" | "completed" | "error",
-  errorMessage?: string
+  errorMessage?: string,
 ) {
   const { error } = await supabaseAdmin
     .from("menu_uploads")

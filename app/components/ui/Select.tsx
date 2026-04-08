@@ -7,11 +7,9 @@ interface SelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
   error?: string;
   className?: string;
   options: { value: string; label: string }[] | string[];
-  name?: string;
-  value?: string;
 }
 
-export const Select = ({ label, error, className, options, name, value, ...props }: SelectProps) => {
+export const Select = ({ label, error, className, options, ...props }: SelectProps) => {
   return (
     <div className="space-y-2 relative">
       {label && <label className="text-[10px] font-black uppercase tracking-widest text-zinc-500 ml-1">{label}</label>}

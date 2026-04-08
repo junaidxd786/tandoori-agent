@@ -5,7 +5,7 @@ import {
   ShoppingBag, MapPin, Clock,
   ChevronDown, RefreshCw, Search,
   Phone, Users, Package, ChevronUp,
-  DollarSign, Truck, Receipt
+  Truck, Receipt
 } from "lucide-react";
 import { formatDistanceToNow, format } from "date-fns";
 import { supabase } from "@/lib/supabase";
@@ -55,7 +55,13 @@ export default function OrdersPage() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { loadOrders(); }, [loadOrders]);
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      void loadOrders();
+    }, 0);
+
+    return () => clearTimeout(timeout);
+  }, [loadOrders]);
 
   useEffect(() => {
     const channel = supabase

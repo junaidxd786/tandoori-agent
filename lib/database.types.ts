@@ -1,6 +1,3 @@
-// Database types — auto-generated stub
-// To regenerate: npx supabase gen types typescript --project-id YOUR_PROJECT_ID > lib/database.types.ts
-
 export type Json =
   | string
   | number
@@ -9,17 +6,25 @@ export type Json =
   | { [key: string]: Json | undefined }
   | Json[];
 
-/**
- * Shared order status union — used in Row, Insert, and Update to prevent
- * inserting invalid statuses like "banana" which TypeScript would previously
- * allow because Insert/Update had status typed as plain `string`.
- */
 export type OrderStatus =
   | "received"
   | "preparing"
   | "out_for_delivery"
   | "delivered"
   | "cancelled";
+
+export type OrderType = "delivery" | "dine-in";
+export type LanguagePreference = "english" | "roman_urdu";
+
+export type WorkflowStep =
+  | "idle"
+  | "collecting_items"
+  | "awaiting_upsell_reply"
+  | "awaiting_order_type"
+  | "awaiting_delivery_address"
+  | "awaiting_dine_in_details"
+  | "awaiting_confirmation"
+  | "awaiting_resume_decision";
 
 export interface Database {
   public: {
@@ -30,32 +35,27 @@ export interface Database {
           phone: string;
           name: string | null;
           mode: "agent" | "human";
+          has_unread: boolean;
+          staff_notes: string | null;
           updated_at: string;
           created_at: string;
-          has_unread: boolean | null;
         };
         Insert: {
           id?: string;
           phone: string;
           name?: string | null;
           mode?: "agent" | "human";
-          updated_at?: string; // Optional, defaults via DB trigger or explicitly set
-          created_at?: string;
-          has_unread?: boolean | null;
-        };
-        Update: {
-          id?: string;
-          phone?: string;
-          name?: string | null;
-          mode?: "agent" | "human";
+          has_unread?: boolean;
+          staff_notes?: string | null;
           updated_at?: string;
           created_at?: string;
-          has_unread?: boolean | null;
         };
+        Update: Partial<Database["public"]["Tables"]["conversations"]["Insert"]>;
       };
       messages: {
         Row: {
           id: string;
+          ingest_seq: number;
           conversation_id: string;
           role: "user" | "assistant";
           content: string;
@@ -64,29 +64,144 @@ export interface Database {
         };
         Insert: {
           id?: string;
+          ingest_seq?: number;
           conversation_id: string;
           role: "user" | "assistant";
           content: string;
-          // Note: nullable because assistant messages do not have a whatsapp_msg_id.
-          // User messages must provide this to prevent replay attacks via unique constraint.
           whatsapp_msg_id?: string | null;
           created_at?: string;
         };
-        Update: {
+        Update: Partial<Database["public"]["Tables"]["messages"]["Insert"]>;
+      };
+      restaurant_settings: {
+        Row: {
+          id: number;
+          is_accepting_orders: boolean;
+          opening_time: string;
+          closing_time: string;
+          min_delivery_amount: number;
+          delivery_enabled: boolean;
+          delivery_fee: number;
+          updated_at: string;
+        };
+        Insert: {
+          id?: number;
+          is_accepting_orders?: boolean;
+          opening_time?: string;
+          closing_time?: string;
+          min_delivery_amount?: number;
+          delivery_enabled?: boolean;
+          delivery_fee?: number;
+          updated_at?: string;
+        };
+        Update: Partial<Database["public"]["Tables"]["restaurant_settings"]["Insert"]>;
+      };
+      menu_items: {
+        Row: {
+          id: string;
+          name: string;
+          price: number;
+          category: string | null;
+          description: string | null;
+          is_available: boolean;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
           id?: string;
-          conversation_id?: string;
-          role?: "user" | "assistant";
-          content?: string;
-          whatsapp_msg_id?: string | null;
+          name: string;
+          price: number;
+          category?: string | null;
+          description?: string | null;
+          is_available?: boolean;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database["public"]["Tables"]["menu_items"]["Insert"]>;
+      };
+      menu_uploads: {
+        Row: {
+          id: string;
+          image_url: string;
+          status: "pending" | "processing" | "completed" | "error";
+          error_message: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          image_url: string;
+          status?: "pending" | "processing" | "completed" | "error";
+          error_message?: string | null;
           created_at?: string;
         };
+        Update: Partial<Database["public"]["Tables"]["menu_uploads"]["Insert"]>;
+      };
+      conversation_states: {
+        Row: {
+          id: string;
+          conversation_id: string;
+          workflow_step: WorkflowStep;
+          cart: Json;
+          preferred_language: LanguagePreference;
+          resume_workflow_step: WorkflowStep | null;
+          last_presented_category: string | null;
+          last_presented_at: string | null;
+          order_type: OrderType | null;
+          address: string | null;
+          guests: number | null;
+          reservation_time: string | null;
+          upsell_item_name: string | null;
+          upsell_item_price: number | null;
+          upsell_offered: boolean;
+          summary_sent_at: string | null;
+          last_user_whatsapp_msg_id: string | null;
+          last_processed_user_message_id: string | null;
+          last_processed_message_seq: number | null;
+          last_processed_user_message_at: string | null;
+          processing_token: string | null;
+          processing_started_at: string | null;
+          last_error: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          conversation_id: string;
+          workflow_step?: WorkflowStep;
+          cart?: Json;
+          preferred_language?: LanguagePreference;
+          resume_workflow_step?: WorkflowStep | null;
+          last_presented_category?: string | null;
+          last_presented_at?: string | null;
+          order_type?: OrderType | null;
+          address?: string | null;
+          guests?: number | null;
+          reservation_time?: string | null;
+          upsell_item_name?: string | null;
+          upsell_item_price?: number | null;
+          upsell_offered?: boolean;
+          summary_sent_at?: string | null;
+          last_user_whatsapp_msg_id?: string | null;
+          last_processed_user_message_id?: string | null;
+          last_processed_message_seq?: number | null;
+          last_processed_user_message_at?: string | null;
+          processing_token?: string | null;
+          processing_started_at?: string | null;
+          last_error?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database["public"]["Tables"]["conversation_states"]["Insert"]>;
       };
       orders: {
         Row: {
           id: string;
           conversation_id: string;
+          source_user_message_id: string | null;
           order_number: number;
-          type: "delivery" | "dine-in";
+          type: OrderType;
           status: OrderStatus;
           subtotal: number;
           delivery_fee: number;
@@ -100,10 +215,9 @@ export interface Database {
         Insert: {
           id?: string;
           conversation_id: string;
+          source_user_message_id?: string | null;
           order_number?: number;
-          type: "delivery" | "dine-in";
-          // Fixed: was typed as plain `string`, allowing any value like "banana".
-          // Now locked to the same OrderStatus union as the Row type.
+          type: OrderType;
           status?: OrderStatus;
           subtotal: number;
           delivery_fee?: number;
@@ -114,22 +228,7 @@ export interface Database {
           created_at?: string;
           updated_at?: string;
         };
-        Update: {
-          id?: string;
-          conversation_id?: string;
-          order_number?: number;
-          type?: "delivery" | "dine-in";
-          // Fixed: same as Insert — was plain `string`.
-          status?: OrderStatus;
-          subtotal?: number;
-          delivery_fee?: number;
-          total?: number;
-          address?: string | null;
-          guests?: number | null;
-          reservation_time?: string | null;
-          created_at?: string;
-          updated_at?: string;
-        };
+        Update: Partial<Database["public"]["Tables"]["orders"]["Insert"]>;
       };
       order_items: {
         Row: {
@@ -138,8 +237,6 @@ export interface Database {
           name: string;
           qty: number;
           price: number;
-          // Added: every other table has created_at; order_items was missing it,
-          // making it impossible to audit when items were added to an order.
           created_at: string;
         };
         Insert: {
@@ -150,14 +247,7 @@ export interface Database {
           price: number;
           created_at?: string;
         };
-        Update: {
-          id?: string;
-          order_id?: string;
-          name?: string;
-          qty?: number;
-          price?: number;
-          created_at?: string;
-        };
+        Update: Partial<Database["public"]["Tables"]["order_items"]["Insert"]>;
       };
     };
   };

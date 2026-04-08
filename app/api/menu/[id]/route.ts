@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { invalidateMenuCache } from "@/lib/menu";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
 type Params = { params: Promise<{ id: string }> };
@@ -24,8 +25,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const { invalidateCacheByPrefix } = await import("@/lib/cache");
-  invalidateCacheByPrefix("menu_");
+  invalidateMenuCache();
 
   return NextResponse.json({ success: true });
 }
@@ -41,8 +41,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const { invalidateCacheByPrefix } = await import("@/lib/cache");
-  invalidateCacheByPrefix("menu_");
+  invalidateMenuCache();
 
   return NextResponse.json({ success: true });
 }

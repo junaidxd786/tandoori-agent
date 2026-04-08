@@ -5,11 +5,9 @@ interface TextInputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   error?: string;
   className?: string;
-  name?: string;
-  value?: string;
 }
 
-export const TextInput = ({ label, error, className, name, value, ...props }: TextInputProps) => {
+export const TextInput = ({ label, error, className, ...props }: TextInputProps) => {
   return (
     <div className="space-y-2">
       {label && <label className="text-[10px] font-black uppercase tracking-widest text-zinc-500 ml-1">{label}</label>}

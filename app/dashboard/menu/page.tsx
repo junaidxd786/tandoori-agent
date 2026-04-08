@@ -2,9 +2,9 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
-  Camera, Plus, Trash2, Loader2,
+  Plus, Trash2, Loader2,
   Search, AlertCircle, CheckCircle2,
-  Package, ChevronDown, UploadCloud, Save
+  Package, ChevronDown, UploadCloud
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -18,6 +18,12 @@ interface MenuItem {
   _saving?: boolean;         // per-row spinner
   _deleting?: boolean;       // per-row delete spinner
 }
+
+type ExtractedMenuItem = {
+  name: string;
+  price: number;
+  category?: string;
+};
 
 // ─── tiny helpers ────────────────────────────────────────────────────────────
 
@@ -187,8 +193,9 @@ export default function MenuPage() {
         });
         if (res.ok) {
           const data = await res.json();
-          const normalized = (data.items || []).map((item: any) => ({
+          const normalized = ((data.items || []) as ExtractedMenuItem[]).map((item) => ({
             ...item,
+            category: item.category || "",
             is_available: true,
             _dirty: true,
           }));

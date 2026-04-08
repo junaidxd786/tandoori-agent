@@ -13,12 +13,26 @@ const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; d
   cancelled: { label: "Dropped", bg: "bg-slate-50", text: "text-slate-600", dot: "bg-slate-400" },
 };
 
+type DashboardOrder = {
+  id: string;
+  order_number: number;
+  status: string;
+  type: "delivery" | "dine-in";
+  subtotal: number;
+  created_at: string;
+  conversations?: { name?: string | null } | null;
+};
+
+type DashboardConversation = {
+  id: string;
+};
+
 export default function DashboardPage() {
   const [stats, setStats] = useState({
     active: 0, today: 0, revenue: 0, chats: 0,
     breakdown: {} as Record<string, number>
   });
-  const [recentOrders, setRecentOrders] = useState<any[]>([]);
+  const [recentOrders, setRecentOrders] = useState<DashboardOrder[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -28,21 +42,21 @@ export default function DashboardPage() {
           fetch("/api/conversations", { headers: { "ngrok-skip-browser-warning": "69420" } }),
           fetch("/api/orders", { headers: { "ngrok-skip-browser-warning": "69420" } })
         ]);
-        const conversations = await cRes.json();
-        const orders = await oRes.json();
+        const conversations = (await cRes.json()) as DashboardConversation[];
+        const orders = (await oRes.json()) as DashboardOrder[];
 
         const activeTypes = ["received", "preparing", "out_for_delivery"];
         const todayStr = new Date().toDateString();
 
-        const counts = orders.reduce((acc: any, o: any) => {
-          acc[o.status] = (acc[o.status] || 0) + 1;
+        const counts = orders.reduce<Record<string, number>>((acc, order) => {
+          acc[order.status] = (acc[order.status] || 0) + 1;
           return acc;
         }, {});
 
         setStats({
-          active: orders.filter((o: any) => activeTypes.includes(o.status)).length,
-          today: orders.filter((o: any) => new Date(o.created_at).toDateString() === todayStr).length,
-          revenue: orders.reduce((acc: number, o: any) => acc + (o.status === 'delivered' ? Number(o.subtotal) : 0), 0),
+          active: orders.filter((order) => activeTypes.includes(order.status)).length,
+          today: orders.filter((order) => new Date(order.created_at).toDateString() === todayStr).length,
+          revenue: orders.reduce((accumulator, order) => accumulator + (order.status === "delivered" ? Number(order.subtotal) : 0), 0),
           chats: conversations.length,
           breakdown: counts
         });

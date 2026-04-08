@@ -1,12 +1,10 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { 
-  Bell, Search, Command, User, 
-  ChevronRight, Sparkles, Activity,
-  Settings, LogOut
+  Search, Command, User, 
+  ChevronRight
 } from "lucide-react";
 import { clsx } from "clsx";
 

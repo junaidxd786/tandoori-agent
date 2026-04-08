@@ -8,7 +8,14 @@ const VALID_STATUSES = [
   "out_for_delivery",
   "delivered",
   "cancelled",
-];
+] as const;
+
+type OrderStatus = (typeof VALID_STATUSES)[number];
+type StatusPatchBody = { status?: OrderStatus };
+type OrderWithConversation = {
+  conversation_id: string;
+  conversations?: { phone?: string | null; name?: string | null } | null;
+};
 
 // PATCH /api/orders/[id]/status
 export async function PATCH(
@@ -16,7 +23,7 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const body = await req.json();
+  const body = (await req.json()) as StatusPatchBody;
   const { status } = body;
 
   if (!status || !VALID_STATUSES.includes(status)) {
@@ -36,11 +43,12 @@ export async function PATCH(
   }
 
   // Notify customer via WhatsApp and persist to conversation history
-  const phone = (order as any).conversations?.phone;
-  const conversationId = (order as any).conversation_id;
+  const typedOrder = order as OrderWithConversation;
+  const phone = typedOrder.conversations?.phone ?? null;
+  const conversationId = typedOrder.conversation_id;
   if (phone) {
-    await notifyCustomer(phone, status, conversationId).catch((e) =>
-      console.error("Notify customer error:", e)
+    await notifyCustomer(phone, status, conversationId).catch((error) =>
+      console.error("Notify customer error:", error)
     );
   }
 

@@ -17,6 +17,10 @@ interface Conversation {
   has_unread: boolean;
   updated_at: string;
   messages?: { content: string; role: string; created_at: string }[];
+  conversation_states?:
+    | { workflow_step: string; order_type: string | null }
+    | Array<{ workflow_step: string; order_type: string | null }>
+    | null;
 }
 
 interface Message {
@@ -30,6 +34,25 @@ interface Message {
 const getInitials = (name?: string) => {
   if (!name) return "#";
   return name.substring(0, 2).toUpperCase();
+};
+
+const getWorkflowLabel = (conversation: Conversation): string | null => {
+  const rawState = Array.isArray(conversation.conversation_states)
+    ? conversation.conversation_states[0]
+    : conversation.conversation_states;
+
+  if (!rawState || rawState.workflow_step === "idle") return null;
+
+  const labels: Record<string, string> = {
+    collecting_items: "Building cart",
+    awaiting_upsell_reply: "Waiting on add-on",
+    awaiting_order_type: "Waiting on order type",
+    awaiting_delivery_address: "Waiting on address",
+    awaiting_dine_in_details: "Waiting on dine-in details",
+    awaiting_confirmation: "Waiting on confirmation",
+  };
+
+  return labels[rawState.workflow_step] ?? rawState.workflow_step;
 };
 
 export default function ConversationsPage() {
@@ -157,7 +180,7 @@ export default function ConversationsPage() {
       });
       if (!res.ok) throw new Error("Update failed");
       toast.success(newMode === "agent" ? "AI Agent active." : "Manual control active.");
-    } catch (err) {
+    } catch {
       toast.error("Failed to switch mode");
       loadConversations();
     }
@@ -193,7 +216,7 @@ export default function ConversationsPage() {
       } else {
         throw new Error("Send failed");
       }
-    } catch (err) {
+    } catch {
       toast.error("Failed to send message.");
       setMessages((prev) => prev.filter(m => m.id !== tempMsg.id));
       setNewMessage(text);
@@ -241,6 +264,7 @@ export default function ConversationsPage() {
             filteredConv.map((conv) => {
               const lastMsg = conv.messages?.[0];
               const isActive = selectedId === conv.id;
+              const workflowLabel = getWorkflowLabel(conv);
 
               return (
                 <button
@@ -297,6 +321,11 @@ export default function ConversationsPage() {
                         }
                       </div>
                     </div>
+                    {workflowLabel && (
+                      <p className="mt-1 text-[10px] font-semibold uppercase tracking-wide text-orange-600 truncate">
+                        {workflowLabel}
+                      </p>
+                    )}
                   </div>
                 </button>
               );
