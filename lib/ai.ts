@@ -6,6 +6,11 @@ const client = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
 });
 
+const groqClient = new OpenAI({
+  baseURL: "https://api.groq.com/openai/v1",
+  apiKey: process.env.GROQ_API_KEY,
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory cache — avoids a DB round-trip on every WhatsApp message
 // ─────────────────────────────────────────────────────────────────────────────
@@ -547,13 +552,13 @@ If an item is not listed above, it does not exist on our menu.
   const allowTools = !orderContext && !isOrderAlreadyPlaced;
 
   // ── Model config ─────────────────────────────────────────────────────────
-  const primaryModel = process.env.AI_MODEL || "arcee-ai/trinity-large-preview:free";
+  const primaryModel = process.env.AI_MODEL || "llama-3.3-70b-versatile";
   const fallbackModel = process.env.AI_FALLBACK_MODEL || "google/gemini-2.0-flash-001:free";
   const maxTokens = parseInt(process.env.AI_MAX_TOKENS || "3500", 10);
 
   // ── Primary model call ───────────────────────────────────────────────────
   try {
-    const completion = await client.chat.completions.create({
+    const completion = await groqClient.chat.completions.create({
       model: primaryModel,
       max_tokens: maxTokens,
       messages,
