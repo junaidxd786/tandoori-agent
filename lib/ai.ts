@@ -7,6 +7,22 @@ const client = new OpenAI({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// In-memory cache — avoids a DB round-trip on every WhatsApp message
+// ─────────────────────────────────────────────────────────────────────────────
+let _cachedSettings: { data: RestaurantSettings; expires: number } | null = null;
+const SETTINGS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+export async function getCachedSettings(): Promise<RestaurantSettings> {
+  const now = Date.now();
+  if (_cachedSettings && _cachedSettings.expires > now) {
+    return _cachedSettings.data;
+  }
+  const fresh = await getRestaurantSettings();
+  _cachedSettings = { data: fresh, expires: now + SETTINGS_CACHE_TTL };
+  return fresh;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -119,17 +135,17 @@ SECTION 4 — PERSONALITY & LANGUAGE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Tone: ${personality}
 
-GREETING:
+GREETING RULES (read carefully — these are absolute):
 ${hasHistory
-      ? `The conversation is already in progress. Do NOT re-greet. Answer the current message directly.`
-      : `First message only: Begin with "Assalam o Alaikum! 👋 Welcome to *${appName}* — ${city}. How can I help you today?"`
+      ? `- This conversation is ALREADY IN PROGRESS. You MUST NOT say "Assalam o Alaikum", "Welcome to", or introduce the restaurant again. Jump directly to answering the customer's current message.
+- Exception: If the user themselves says "aoa" or "assalam o alaikum", reply ONLY with "Walaikum Assalam!" and then answer their question.`
+      : `- This is the FIRST message. Start your reply with: "Assalam o Alaikum! 👋 Welcome to *${appName}* — ${city}. How can I help you today?"
+- If the user's first message is "aoa" or "assalam o alaikum", reply with: "Walaikum Assalam! 👋 Welcome to *${appName}*! How can I help you today?"`
     }
 
 LANGUAGE DETECTION:
 - Detect whether the user writes in English or Roman Urdu and mirror
   their language exactly for the entire conversation.
-- If the user greets with "aoa", "Aoa", "AOA", or "assalam o alaikum",
-  ALWAYS reply with "Walaikum Assalam!" as your opening word.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SECTION 5 — MENU DISPLAY RULES
@@ -215,8 +231,8 @@ SECTION 7 — ORDER MODIFICATIONS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SECTION 8 — EDGE CASES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- Off-topic question: "I can only help with menu and order questions 😊
-  What would you like to eat?"
+- Item / category not in the LIVE MENU block (e.g. "Do you have beverages?"): Check the LIVE MENU block first. If genuinely absent, say: "Sorry, we don't have [category/item] on our menu right now. Can I help you with something else? 😊"
+- Truly off-topic (e.g. jokes, personal questions, directions): "I can only help with our menu and orders 😊 What would you like to eat?"
 - Rude customer: remain calm and professional. Do not engage with insults.
 - "Same as last time": explain you don't have order history and ask
   them to place a fresh order.
@@ -398,7 +414,7 @@ export async function getAIReply(
 ): Promise<OpenAI.Chat.Completions.ChatCompletionMessage & { tool_calls?: any[] }> {
 
   if (!settings) {
-    settings = await getRestaurantSettings();
+    settings = await getCachedSettings();
   }
 
   // ── Build message array ──────────────────────────────────────────────────
@@ -530,8 +546,8 @@ If an item is not listed above, it does not exist on our menu.
   const allowTools = !orderContext && !isOrderAlreadyPlaced;
 
   // ── Model config ─────────────────────────────────────────────────────────
-  const primaryModel = process.env.AI_MODEL || "google/gemini-2.0-flash-001";
-  const fallbackModel = process.env.AI_FALLBACK_MODEL || "anthropic/claude-3-haiku";
+  const primaryModel = process.env.AI_MODEL || "meta-llama/llama-4-maverick:free";
+  const fallbackModel = process.env.AI_FALLBACK_MODEL || "google/gemini-2.0-flash-001:free";
   const maxTokens = parseInt(process.env.AI_MAX_TOKENS || "3500", 10);
 
   // ── Primary model call ───────────────────────────────────────────────────

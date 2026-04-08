@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
-import { getAIReply } from "@/lib/ai";
+import { getAIReply, getCachedSettings } from "@/lib/ai";
 import { sendWhatsAppMessage } from "@/lib/whatsapp";
 import { getMenuForAI } from "@/lib/menu";
-import { getRestaurantSettings, updateRestaurantSettings, isWithinOperatingHours } from "@/lib/settings";
+import { updateRestaurantSettings, isWithinOperatingHours } from "@/lib/settings";
 
 
 // GET — Meta webhook verification
@@ -110,8 +110,8 @@ async function processWebhook(body: any) {
     // Reverse history to maintain chronological order for the AI
     const history = (historyRows ?? []).reverse().map((r) => ({ role: r.role, content: r.content }));
 
-    // 3b. Fetch settings & auto-toggle is_accepting_orders based on clock
-    const settings = await getRestaurantSettings();
+    // 3b. Fetch settings (cached for 5 min) & auto-toggle is_accepting_orders based on clock
+    const settings = await getCachedSettings();
     const withinHours = isWithinOperatingHours(settings.opening_time, settings.closing_time);
     const isOpenNow = settings.is_accepting_orders && withinHours;
 
