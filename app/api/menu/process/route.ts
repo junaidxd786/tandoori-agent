@@ -18,8 +18,8 @@ export async function POST(req: NextRequest) {
     await updateMenuUploadStatus(upload.id, "processing");
     const result = await processMenuImage(imageUrl);
 
-    // 3. Extract items (handle both array and object formats)
-    const items = Array.isArray(result) ? result : (result.items || result.menu_items || []);
+    // 3. Extract items (normalized array returned by processMenuImage)
+    const items = result;
     
     if (items.length > 0) {
        // Optional: We could just return them to the UI for confirmation 
