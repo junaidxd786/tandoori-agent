@@ -10,6 +10,9 @@ export type MenuItem = {
   is_available?: boolean;
 };
 
+let _cachedMenu: { data: string; expires: number } | null = null;
+const MENU_CACHE_TTL = 60 * 1000; // 60 seconds
+
 /**
  * Fetch all available menu items and format them for the AI context window.
  *
@@ -20,11 +23,15 @@ export type MenuItem = {
  * The bullet + em-dash (—) separator is visually distinctive and unambiguous.
  * The model cannot confuse "—" with a price range or a colon-separated key/value.
  *
- * Always fetches live from Supabase — no in-memory cache.
- * Next.js serverless route isolation means a cache set in one request cannot be
- * read by a different route handler, so caching here would silently serve stale data.
+ * Uses a short in-memory cache to prevent multiple DB queries when users
+ * send rapid sequential messages.
  */
 export async function getMenuForAI(): Promise<string | null> {
+  const now = Date.now();
+  if (_cachedMenu && _cachedMenu.expires > now) {
+    return _cachedMenu.data;
+  }
+
   const { data, error } = await supabaseAdmin
     .from("menu_items")
     .select("name, price, category")
@@ -54,7 +61,9 @@ export async function getMenuForAI(): Promise<string | null> {
     ([cat, items]) => `### ${cat}\n${items.join("\n")}`
   );
 
-  return lines.join("\n\n");
+  const result = lines.join("\n\n");
+  _cachedMenu = { data: result, expires: now + MENU_CACHE_TTL };
+  return result;
 }
 
 /**

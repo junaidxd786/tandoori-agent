@@ -92,7 +92,7 @@ async function processWebhook(body: any) {
     const [{ data: historyRows }, menuString, { data: recentOrders }] = await Promise.all([
       supabaseAdmin
         .from("messages")
-        .select("role, content")
+        .select("role, content, whatsapp_msg_id")
         .eq("conversation_id", conversation.id)
         .gte("created_at", sessionStart)
         .order("created_at", { ascending: false })
@@ -141,6 +141,32 @@ async function processWebhook(body: any) {
     // 5. Get AI Reply (with Tool Calling) — pass isOpenNow so AI cannot hallucinate open/closed
     const hasHistory = (historyRows ?? []).some(r => r.role === "assistant");
     const aiResponse = await getAIReply(history, menuString ?? undefined, orderContext, isOpenNow, hasHistory, settings);
+
+    // 5b. Race Condition Prevention
+    // If the user sent a new message while the AI was generating this reply,
+    // abort this execution. The newest webhook will reply with the combined context.
+    const knownUserMsgIds = new Set(
+      (historyRows ?? [])
+        .filter((r) => r.role === "user" && r.whatsapp_msg_id)
+        .map((r) => r.whatsapp_msg_id)
+    );
+
+    const { data: latestUserMsgs } = await supabaseAdmin
+      .from("messages")
+      .select("whatsapp_msg_id")
+      .eq("conversation_id", conversation.id)
+      .eq("role", "user")
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    const hasNewerMessage = latestUserMsgs?.some(
+      (msg) => msg.whatsapp_msg_id && !knownUserMsgIds.has(msg.whatsapp_msg_id)
+    );
+
+    if (hasNewerMessage) {
+      console.log("Abort AI response. A newer message arrived while processing.");
+      return;
+    }
 
     // 6. Handle Tool Calls — with strict deduplication guard
     const deliveryPhone = process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "";
