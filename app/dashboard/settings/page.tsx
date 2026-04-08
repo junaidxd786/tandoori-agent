@@ -14,6 +14,26 @@ type SettingsState = {
   min_delivery_amount: number;
 };
 
+function toTimeInputValue(value: string): string {
+  const normalized = value.trim();
+  const twelveHour = normalized.match(/^(\d{1,2}):(\d{2})\s*([AaPp][Mm])$/);
+  if (twelveHour) {
+    let hours = Number.parseInt(twelveHour[1], 10) % 12;
+    const minutes = Number.parseInt(twelveHour[2], 10);
+    if (twelveHour[3].toUpperCase() === "PM") hours += 12;
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  }
+
+  return /^\d{2}:\d{2}$/.test(normalized) ? normalized : "";
+}
+
+function toMeridiemLabel(value: string): string {
+  const [rawHours, rawMinutes] = value.split(":").map(Number);
+  const period = rawHours >= 12 ? "PM" : "AM";
+  const displayHours = rawHours % 12 === 0 ? 12 : rawHours % 12;
+  return `${displayHours}:${String(rawMinutes).padStart(2, "0")} ${period}`;
+}
+
 export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -123,21 +143,29 @@ export default function SettingsPage() {
         <Card icon={<Clock size={16} />} title="Business Hours">
           <SettingRow label="Opens">
             <input
-              type="text"
-              value={settings.opening_time}
-              onChange={(event) => setSettings((current) => ({ ...current, opening_time: event.target.value }))}
-              className="w-28 text-right text-sm font-semibold text-slate-800 bg-transparent outline-none"
+              type="time"
+              value={toTimeInputValue(settings.opening_time)}
+              onChange={(event) =>
+                event.target.value
+                  ? setSettings((current) => ({ ...current, opening_time: toMeridiemLabel(event.target.value) }))
+                  : null
+              }
+              className="w-32 text-right text-sm font-semibold text-slate-800 bg-transparent outline-none"
             />
           </SettingRow>
           <SettingRow label="Closes">
             <input
-              type="text"
-              value={settings.closing_time}
-              onChange={(event) => setSettings((current) => ({ ...current, closing_time: event.target.value }))}
-              className="w-28 text-right text-sm font-semibold text-slate-800 bg-transparent outline-none"
+              type="time"
+              value={toTimeInputValue(settings.closing_time)}
+              onChange={(event) =>
+                event.target.value
+                  ? setSettings((current) => ({ ...current, closing_time: toMeridiemLabel(event.target.value) }))
+                  : null
+              }
+              className="w-32 text-right text-sm font-semibold text-slate-800 bg-transparent outline-none"
             />
           </SettingRow>
-          <p className="text-xs text-slate-400 mt-2 px-1 font-medium">Format: 10:00 AM / 11:00 PM</p>
+          <p className="text-xs text-slate-400 mt-2 px-1 font-medium">Saved in restaurant local time. Overnight hours are supported.</p>
         </Card>
 
         <Card icon={<Truck size={16} />} title="Delivery Rules">

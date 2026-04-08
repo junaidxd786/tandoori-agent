@@ -26,6 +26,9 @@ export type WorkflowStep =
   | "awaiting_confirmation"
   | "awaiting_resume_decision";
 
+export type MessageSenderKind = "user" | "ai" | "human" | "system";
+export type MessageDeliveryStatus = "pending" | "sent" | "failed";
+
 export interface Database {
   public: {
     Tables: {
@@ -58,8 +61,11 @@ export interface Database {
           ingest_seq: number;
           conversation_id: string;
           role: "user" | "assistant";
+          sender_kind: MessageSenderKind;
           content: string;
           whatsapp_msg_id: string | null;
+          delivery_status: MessageDeliveryStatus | null;
+          delivery_error: string | null;
           created_at: string;
         };
         Insert: {
@@ -67,8 +73,11 @@ export interface Database {
           ingest_seq?: number;
           conversation_id: string;
           role: "user" | "assistant";
+          sender_kind?: MessageSenderKind;
           content: string;
           whatsapp_msg_id?: string | null;
+          delivery_status?: MessageDeliveryStatus | null;
+          delivery_error?: string | null;
           created_at?: string;
         };
         Update: Partial<Database["public"]["Tables"]["messages"]["Insert"]>;
@@ -209,6 +218,10 @@ export interface Database {
           address: string | null;
           guests: number | null;
           reservation_time: string | null;
+          assigned_to: string | null;
+          status_notified_at: string | null;
+          status_notification_status: "sent" | "failed" | "skipped" | null;
+          status_notification_error: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -225,6 +238,10 @@ export interface Database {
           address?: string | null;
           guests?: number | null;
           reservation_time?: string | null;
+          assigned_to?: string | null;
+          status_notified_at?: string | null;
+          status_notification_status?: "sent" | "failed" | "skipped" | null;
+          status_notification_error?: string | null;
           created_at?: string;
           updated_at?: string;
         };

@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextRequest } from "next/server";
 import { getCustomerSupportReply } from "@/lib/ai";
+import { OutboundMessageError, sendAndPersistOutboundMessage } from "@/lib/messages";
 import {
   decideTurn,
   getDefaultConversationState,
@@ -12,7 +13,6 @@ import {
 import { getMenuCatalog, getMenuForAI } from "@/lib/menu";
 import { getRestaurantSettings, isWithinOperatingHours } from "@/lib/settings";
 import { supabaseAdmin } from "@/lib/supabase-admin";
-import { sendWhatsAppMessage } from "@/lib/whatsapp";
 
 type IncomingWhatsAppMessage = {
   id: string;
@@ -211,6 +211,7 @@ async function persistUserMessage(
     .insert({
       conversation_id: conversationId,
       role: "user",
+      sender_kind: "user",
       content,
       whatsapp_msg_id: whatsappMessageId,
       created_at: createdAt,
@@ -318,20 +319,60 @@ async function drainConversationQueue(conversation: ConversationRow) {
           last_error: null,
         });
       } catch (error) {
+        if (error instanceof OutboundMessageError) {
+          if (error.messageSent) {
+            await updateConversationState(state, {
+              ...updatedState,
+              last_processed_user_message_id: nextMessage.whatsapp_msg_id,
+              last_processed_message_seq: nextMessage.ingest_seq,
+              last_processed_user_message_at: nextMessage.created_at,
+              last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
+              last_error: error.message,
+            });
+            continue;
+          }
+
+          await updateConversationState(state, {
+            last_error: error.message,
+          });
+          throw error;
+        }
+
         const replyLanguage =
           (updatedState.preferred_language ?? state.preferred_language) === "roman_urdu" ? "roman_urdu" : "english";
         const fallback =
           replyLanguage === "roman_urdu"
             ? "Maazrat, system is waqt thora busy hai. Thori dair mein dubara message bhej dein ya urgent help ke liye call karein."
             : "I'm sorry, the system is a little busy right now. Please send your message again in a moment or call us for urgent help.";
-        await sendAndPersistAssistantMessage(conversation.id, conversation.phone, fallback);
-        await updateConversationState(state, {
-          last_processed_user_message_id: nextMessage.whatsapp_msg_id,
-          last_processed_message_seq: nextMessage.ingest_seq,
-          last_processed_user_message_at: nextMessage.created_at,
-          last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
-          last_error: error instanceof Error ? error.message : "Unknown processing error",
-        });
+        try {
+          await sendAndPersistAssistantMessage(conversation.id, conversation.phone, fallback);
+          await updateConversationState(state, {
+            last_processed_user_message_id: nextMessage.whatsapp_msg_id,
+            last_processed_message_seq: nextMessage.ingest_seq,
+            last_processed_user_message_at: nextMessage.created_at,
+            last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
+            last_error: error instanceof Error ? error.message : "Unknown processing error",
+          });
+        } catch (fallbackError) {
+          if (fallbackError instanceof OutboundMessageError && fallbackError.messageSent) {
+            await updateConversationState(state, {
+              last_processed_user_message_id: nextMessage.whatsapp_msg_id,
+              last_processed_message_seq: nextMessage.ingest_seq,
+              last_processed_user_message_at: nextMessage.created_at,
+              last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
+              last_error: fallbackError.message,
+            });
+            continue;
+          }
+
+          await updateConversationState(state, {
+            last_error:
+              error instanceof Error
+                ? `${error.message} | Fallback failed: ${fallbackError instanceof Error ? fallbackError.message : "Unknown error"}`
+                : "Unknown processing error",
+          });
+          throw fallbackError;
+        }
       }
     }
   } finally {
@@ -405,17 +446,12 @@ async function getRecentOrderContext(conversationId: string): Promise<RecentOrde
 }
 
 async function sendAndPersistAssistantMessage(conversationId: string, phone: string, content: string) {
-  await sendWhatsAppMessage(phone, content);
-
-  const { error } = await supabaseAdmin.from("messages").insert({
-    conversation_id: conversationId,
-    role: "assistant",
+  await sendAndPersistOutboundMessage({
+    conversationId,
+    phone,
     content,
+    senderKind: "ai",
   });
-
-  if (error) {
-    throw error;
-  }
 }
 
 async function markMessageProcessed(
@@ -537,10 +573,10 @@ async function createOrderFromPayload(
     }
 
     return {
-      name: match.name,
+      name: item.name,
       qty: item.qty,
-      price: Number(match.price),
-      category: match.category ?? null,
+      price: Number(item.price),
+      category: item.category ?? null,
     };
   });
 

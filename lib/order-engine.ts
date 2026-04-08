@@ -1,4 +1,8 @@
-import type { RestaurantSettings } from "./settings";
+import {
+  buildRestaurantDateTimeIso,
+  getRestaurantNowParts,
+  type RestaurantSettings,
+} from "./settings";
 
 export type WorkflowStep =
   | "idle"
@@ -1293,21 +1297,30 @@ function parseReservationTime(text: string): string | null {
   const match = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i);
   if (!match) return null;
 
-  const now = new Date();
+  const now = getRestaurantNowParts();
   let hours = Number.parseInt(match[1], 10);
   const minutes = match[2] ? Number.parseInt(match[2], 10) : 0;
   const period = match[3].toLowerCase();
 
   if (period === "pm" && hours !== 12) hours += 12;
   if (period === "am" && hours === 12) hours = 0;
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
 
-  const reservation = new Date(now);
-  reservation.setHours(hours, minutes, 0, 0);
-  if (reservation.getTime() < now.getTime()) {
-    reservation.setDate(reservation.getDate() + 1);
+  let year = now.year;
+  let month = now.month;
+  let day = now.day;
+  const currentTotalMinutes = now.hour * 60 + now.minute;
+  const requestedTotalMinutes = hours * 60 + minutes;
+
+  if (requestedTotalMinutes < currentTotalMinutes) {
+    const rollover = new Date(Date.UTC(now.year, now.month - 1, now.day, 12, 0, 0));
+    rollover.setUTCDate(rollover.getUTCDate() + 1);
+    year = rollover.getUTCFullYear();
+    month = rollover.getUTCMonth() + 1;
+    day = rollover.getUTCDate();
   }
 
-  return reservation.toISOString();
+  return buildRestaurantDateTimeIso(year, month, day, hours, minutes);
 }
 
 function extractCartItems(text: string, menuItems: MenuCatalogItem[], aggressive: boolean): DraftCartItem[] {

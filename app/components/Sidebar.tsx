@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
   MessageSquare,
@@ -12,6 +12,7 @@ import {
   Settings,
 } from "lucide-react";
 import { clsx } from "clsx";
+import { supabase } from "@/lib/supabase";
 
 const navItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
@@ -23,6 +24,7 @@ const navItems = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
   const appName = process.env.NEXT_PUBLIC_APP_NAME || "Tandoori Hub";
   const [firstWord, ...rest] = appName.split(" ");
 
@@ -56,9 +58,15 @@ export function Sidebar() {
   };
 
   useEffect(() => {
+    navItems.forEach((item) => {
+      router.prefetch(item.href);
+    });
+  }, [router]);
+
+  useEffect(() => {
     const checkNotifications = async () => {
       try {
-        const res = await fetch("/api/conversations", {
+        const res = await fetch("/api/conversations?limit=100", {
           cache: "no-store",
           headers: { "ngrok-skip-browser-warning": "69420" }
         });
@@ -96,9 +104,17 @@ export function Sidebar() {
       }
     };
 
-    checkNotifications();
-    const interval = setInterval(checkNotifications, 4000);
-    return () => clearInterval(interval);
+    void checkNotifications();
+
+    const channel = supabase
+      .channel("sidebar-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "conversations" }, () => void checkNotifications())
+      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => void checkNotifications())
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   return (
@@ -137,6 +153,7 @@ export function Sidebar() {
             <Link
               key={href}
               href={href}
+              prefetch
               className={clsx(
                 "relative flex items-center justify-between px-3.5 py-3 rounded-xl text-sm font-medium transition-all group overflow-hidden",
                 isActive

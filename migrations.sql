@@ -14,11 +14,47 @@ alter table messages add column if not exists ingest_seq bigint;
 alter table messages alter column ingest_seq set default nextval('messages_ingest_seq_seq');
 update messages set ingest_seq = nextval('messages_ingest_seq_seq') where ingest_seq is null;
 alter table messages alter column ingest_seq set not null;
+alter table messages add column if not exists sender_kind text not null default 'user';
+alter table messages add column if not exists delivery_status text;
+alter table messages add column if not exists delivery_error text;
+
+update messages
+set sender_kind = case
+  when role = 'user' then 'user'
+  else 'ai'
+end
+where sender_kind is null
+   or sender_kind not in ('user', 'ai', 'human', 'system');
+
+alter table messages
+  drop constraint if exists messages_sender_kind_check;
+
+alter table messages
+  add constraint messages_sender_kind_check
+  check (sender_kind in ('user', 'ai', 'human', 'system')) not valid;
+
+alter table messages
+  drop constraint if exists messages_delivery_status_check;
+
+alter table messages
+  add constraint messages_delivery_status_check
+  check (delivery_status is null or delivery_status in ('pending', 'sent', 'failed')) not valid;
 
 alter table order_items add column if not exists created_at timestamptz not null default now();
 
 alter table orders add column if not exists source_user_message_id text;
+alter table orders add column if not exists assigned_to text;
+alter table orders add column if not exists status_notified_at timestamptz;
+alter table orders add column if not exists status_notification_status text;
+alter table orders add column if not exists status_notification_error text;
 create unique index if not exists idx_orders_source_user_message_id on orders(source_user_message_id) where source_user_message_id is not null;
+
+alter table orders
+  drop constraint if exists orders_status_notification_status_check;
+
+alter table orders
+  add constraint orders_status_notification_status_check
+  check (status_notification_status is null or status_notification_status in ('sent', 'failed', 'skipped')) not valid;
 
 create table if not exists conversation_states (
   id uuid primary key default gen_random_uuid(),
@@ -141,6 +177,7 @@ create index if not exists idx_messages_conversation_ingest_seq on messages(conv
 create index if not exists idx_messages_whatsapp_msg_id on messages(whatsapp_msg_id) where whatsapp_msg_id is not null;
 create index if not exists idx_orders_conversation_created on orders(conversation_id, created_at desc);
 create index if not exists idx_conversation_states_conversation on conversation_states(conversation_id);
+create index if not exists idx_menu_items_name_lookup on menu_items((lower(trim(name))));
 
 create or replace function update_updated_at_column()
 returns trigger
@@ -172,20 +209,68 @@ alter table orders
     (type = 'dine-in' and address is null and guests is not null and reservation_time is not null)
   ) not valid;
 
-create or replace function replace_menu_items(menu_payload jsonb)
-returns void
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and tablename = 'conversations'
+  ) then
+    alter publication supabase_realtime add table conversations;
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and tablename = 'conversation_states'
+  ) then
+    alter publication supabase_realtime add table conversation_states;
+  end if;
+end $$;
+
+create or replace function apply_menu_catalog(menu_payload jsonb, replace_all boolean default false)
+returns jsonb
 language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  duplicate_name text;
 begin
-  delete from menu_items;
+  select lower(trim(item.name))
+  into duplicate_name
+  from jsonb_to_recordset(menu_payload) as item(
+    name text,
+    price numeric,
+    category text,
+    description text,
+    is_available boolean,
+    sort_order integer
+  )
+  group by lower(trim(item.name))
+  having count(*) > 1
+  limit 1;
 
-  insert into menu_items (name, price, category, description, is_available, sort_order)
+  if duplicate_name is not null then
+    raise exception 'Duplicate menu item in payload: %', duplicate_name;
+  end if;
+
+  create temp table tmp_menu_payload (
+    normalized_name text primary key,
+    name text not null,
+    price numeric not null,
+    category text,
+    description text,
+    is_available boolean not null,
+    sort_order integer not null
+  ) on commit drop;
+
+  insert into tmp_menu_payload (normalized_name, name, price, category, description, is_available, sort_order)
   select
+    lower(trim(item.name)),
     trim(item.name),
     item.price,
-    nullif(trim(item.category), ''),
+    nullif(regexp_replace(trim(coalesce(item.category, '')), '\s+', ' ', 'g'), ''),
     nullif(trim(item.description), ''),
     coalesce(item.is_available, true),
     coalesce(item.sort_order, 0)
@@ -198,5 +283,56 @@ begin
     sort_order integer
   )
   where trim(coalesce(item.name, '')) <> '';
+
+  update menu_items as existing
+  set
+    name = incoming.name,
+    price = incoming.price,
+    category = incoming.category,
+    description = incoming.description,
+    is_available = incoming.is_available,
+    sort_order = incoming.sort_order
+  from tmp_menu_payload as incoming
+  where lower(trim(existing.name)) = incoming.normalized_name;
+
+  insert into menu_items (name, price, category, description, is_available, sort_order)
+  select
+    incoming.name,
+    incoming.price,
+    incoming.category,
+    incoming.description,
+    incoming.is_available,
+    incoming.sort_order
+  from tmp_menu_payload as incoming
+  where not exists (
+    select 1
+    from menu_items as existing
+    where lower(trim(existing.name)) = incoming.normalized_name
+  );
+
+  if replace_all then
+    delete from menu_items as existing
+    where not exists (
+      select 1
+      from tmp_menu_payload as incoming
+      where incoming.normalized_name = lower(trim(existing.name))
+    );
+  end if;
+
+  return jsonb_build_object(
+    'applied', (select count(*) from tmp_menu_payload),
+    'replace_all', replace_all
+  );
+end;
+$$;
+
+create or replace function replace_menu_items(menu_payload jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform apply_menu_catalog(menu_payload, true);
 end;
 $$;

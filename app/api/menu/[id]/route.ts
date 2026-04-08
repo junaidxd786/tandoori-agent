@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { invalidateMenuCache } from "@/lib/menu";
+import { invalidateMenuCache, normalizeMenuCategory } from "@/lib/menu";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
 type Params = { params: Promise<{ id: string }> };
@@ -13,6 +13,26 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const updates: Record<string, unknown> = {};
   for (const key of allowed) {
     if (key in body) updates[key] = body[key];
+  }
+
+  if ("name" in updates) {
+    const name = String(updates.name ?? "").trim();
+    if (!name) {
+      return NextResponse.json({ error: "Name cannot be empty" }, { status: 400 });
+    }
+    updates.name = name;
+  }
+
+  if ("price" in updates) {
+    const price = Number(updates.price);
+    if (!Number.isFinite(price) || price < 0) {
+      return NextResponse.json({ error: "Price must be a non-negative number" }, { status: 400 });
+    }
+    updates.price = price;
+  }
+
+  if ("category" in updates) {
+    updates.category = normalizeMenuCategory(String(updates.category ?? "")) ?? null;
   }
 
   if (Object.keys(updates).length === 0)

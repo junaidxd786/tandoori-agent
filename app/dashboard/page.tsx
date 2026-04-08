@@ -1,9 +1,10 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { MessageSquare, ShoppingBag, TrendingUp, Zap, Settings, Activity, ArrowUpRight } from "lucide-react";
 import Link from "next/link";
 import { formatDistanceToNow } from "date-fns";
 import { clsx } from "clsx";
+import { supabase } from "@/lib/supabase";
 
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; dot: string }> = {
   received: { label: "New", bg: "bg-blue-50", text: "text-blue-700", dot: "bg-blue-500" },
@@ -34,41 +35,57 @@ export default function DashboardPage() {
   });
   const [recentOrders, setRecentOrders] = useState<DashboardOrder[]>([]);
   const [loading, setLoading] = useState(true);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [cRes, oRes] = await Promise.all([
+        fetch("/api/conversations?limit=80", { headers: { "ngrok-skip-browser-warning": "69420" } }),
+        fetch("/api/orders?limit=80", { headers: { "ngrok-skip-browser-warning": "69420" } })
+      ]);
+      const conversations = (await cRes.json()) as DashboardConversation[];
+      const orders = (await oRes.json()) as DashboardOrder[];
+
+      const activeTypes = ["received", "preparing", "out_for_delivery"];
+      const todayStr = new Date().toDateString();
+
+      const counts = orders.reduce<Record<string, number>>((acc, order) => {
+        acc[order.status] = (acc[order.status] || 0) + 1;
+        return acc;
+      }, {});
+
+      setStats({
+        active: orders.filter((order) => activeTypes.includes(order.status)).length,
+        today: orders.filter((order) => new Date(order.created_at).toDateString() === todayStr).length,
+        revenue: orders.reduce((accumulator, order) => accumulator + (order.status === "delivered" ? Number(order.subtotal) : 0), 0),
+        chats: conversations.length,
+        breakdown: counts
+      });
+      setRecentOrders(orders.slice(0, 8));
+      setLastUpdatedAt(new Date().toISOString());
+    } catch (e) {
+      console.error("Data fetch failed", e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    async function fetchData() {
-      try {
-        const [cRes, oRes] = await Promise.all([
-          fetch("/api/conversations", { headers: { "ngrok-skip-browser-warning": "69420" } }),
-          fetch("/api/orders", { headers: { "ngrok-skip-browser-warning": "69420" } })
-        ]);
-        const conversations = (await cRes.json()) as DashboardConversation[];
-        const orders = (await oRes.json()) as DashboardOrder[];
+    void fetchData();
+  }, [fetchData]);
 
-        const activeTypes = ["received", "preparing", "out_for_delivery"];
-        const todayStr = new Date().toDateString();
+  useEffect(() => {
+    const channel = supabase
+      .channel("dashboard-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => void fetchData())
+      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => void fetchData())
+      .on("postgres_changes", { event: "*", schema: "public", table: "conversations" }, () => void fetchData())
+      .subscribe();
 
-        const counts = orders.reduce<Record<string, number>>((acc, order) => {
-          acc[order.status] = (acc[order.status] || 0) + 1;
-          return acc;
-        }, {});
-
-        setStats({
-          active: orders.filter((order) => activeTypes.includes(order.status)).length,
-          today: orders.filter((order) => new Date(order.created_at).toDateString() === todayStr).length,
-          revenue: orders.reduce((accumulator, order) => accumulator + (order.status === "delivered" ? Number(order.subtotal) : 0), 0),
-          chats: conversations.length,
-          breakdown: counts
-        });
-        setRecentOrders(orders.slice(0, 8));
-      } catch (e) {
-        console.error("Data fetch failed", e);
-      } finally {
-        setLoading(false);
-      }
-    }
-    fetchData();
-  }, []);
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [fetchData]);
 
   return (
     <div className="space-y-8 animate-fade-in">
@@ -231,12 +248,12 @@ export default function DashboardPage() {
                 <div className="p-1.5 bg-orange-500/20 rounded-md">
                   <Zap size={14} className="text-brand fill-orange-500/20" />
                 </div>
-                <p className="text-xs font-medium text-zinc-400 uppercase tracking-widest">AI Copilot</p>
+                <p className="text-xs font-medium text-zinc-400 uppercase tracking-widest">Realtime Status</p>
               </div>
 
-              <h4 className="text-xl font-semibold mb-2 text-white">Systems Active</h4>
+              <h4 className="text-xl font-semibold mb-2 text-white">Live Updates Active</h4>
               <p className="text-sm text-zinc-400 leading-relaxed mb-6">
-                Your AI agent is currently managing <strong className="text-white font-medium">{stats.active} active orders</strong>. Latency is optimal at 42ms.
+                The dashboard is subscribed to live order and message updates. It currently shows <strong className="text-white font-medium">{stats.active} active orders</strong>{lastUpdatedAt ? ` and was refreshed ${formatDistanceToNow(new Date(lastUpdatedAt), { addSuffix: true })}.` : "."}
               </p>
 
               <Link href="/dashboard/conversations" className="flex items-center justify-center gap-2 w-full py-2.5 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-xl text-sm font-medium text-zinc-200 transition-colors">

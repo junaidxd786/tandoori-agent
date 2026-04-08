@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { invalidateMenuCache } from "@/lib/menu";
+import { applyMenuCatalog, sanitizeMenuItems } from "@/lib/menu";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
 type IncomingMenuItem = {
@@ -38,31 +38,23 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: "Invalid data format" }, { status: 400 });
     }
 
-    if (replaceAll) {
-      const { error: deleteError } = await supabaseAdmin
-        .from("menu_items")
-        .delete()
-        .neq("id", "00000000-0000-0000-0000-000000000000");
-
-      if (deleteError) throw deleteError;
+    const sanitized = sanitizeMenuItems(items);
+    if (sanitized.issues.length > 0) {
+      return NextResponse.json(
+        {
+          error: "Menu validation failed",
+          issues: sanitized.issues,
+        },
+        { status: 400 },
+      );
     }
 
-    if (items.length > 0) {
-      const normalizedItems = items
-        .filter((item) => item.name.trim().length > 0)
-        .map((item) => ({
-          name: item.name.trim(),
-          price: Number(item.price),
-          category: item.category?.trim() || null,
-          is_available: item.is_available ?? true,
-        }));
-
-      const { error: insertError } = await supabaseAdmin.from("menu_items").insert(normalizedItems);
-      if (insertError) throw insertError;
-    }
-
-    invalidateMenuCache();
-    return NextResponse.json({ success: true });
+    await applyMenuCatalog(sanitized.items, replaceAll);
+    return NextResponse.json({
+      success: true,
+      replaceAll,
+      applied: sanitized.items.length,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Menu update failed";
     console.error("[menu route] PUT failed:", error);
