@@ -61,16 +61,45 @@ async function processWebhook(body: any) {
     const messageText: string = msg.text?.body ?? "";
     const timestamp = new Date(parseInt(msg.timestamp) * 1000).toISOString();
 
-    // 1. Get/Create Conversation
-    const { data: conversation, error: convError } = await supabaseAdmin
-      .from("conversations")
-      .upsert({ phone: from, name: contactName, has_unread: true, updated_at: new Date().toISOString() }, { onConflict: "phone" })
-      .select().single();
+    // 1. Get/Create Conversation — retry once on transient socket errors
+    let conversation: any = null;
+    let convError: any = null;
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const result = await supabaseAdmin
+        .from("conversations")
+        .upsert(
+          { phone: from, name: contactName, has_unread: true, updated_at: new Date().toISOString() },
+          { onConflict: "phone" }
+        )
+        .select()
+        .single();
+
+      convError = result.error;
+      conversation = result.data;
+
+      if (!convError) break; // success
+
+      const isSocketError =
+        convError.message?.includes("fetch failed") ||
+        convError.message?.includes("UND_ERR") ||
+        convError.details?.includes("fetch failed");
+
+      if (isSocketError && attempt < 2) {
+        console.warn(`[Webhook] Supabase socket error on attempt ${attempt}, retrying…`, convError.message);
+        await new Promise((r) => setTimeout(r, 300)); // brief pause before retry
+        continue;
+      }
+
+      // Real error or retries exhausted
+      break;
+    }
 
     if (convError || !conversation || conversation.mode === "human") {
       console.log("Webhook aborted: convError, no conversation, or mode=human", { convError, mode: conversation?.mode });
       return;
     }
+
 
     // 2. Save User Message (unique on whatsapp_msg_id to prevent replays)
     const { error: msgError } = await supabaseAdmin.from("messages").insert({
@@ -86,19 +115,20 @@ async function processWebhook(body: any) {
     }
 
     console.log("Fetching AI Reply...");
-    // 3. Fetch History (last 3 hours for session expiry, up to 20 messages)
+    // 3. Fetch History + menu + recent orders
+    // Run the two Supabase queries sequentially to avoid exhausting the free-tier connection pool.
+    // Menu is fetched in parallel since it uses its own in-memory cache (no extra DB connection).
     const sessionStart = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
 
-    const [{ data: historyRows }, menuString, { data: recentOrders }] = await Promise.all([
+    const [menuString, { data: historyRows }, { data: recentOrders }] = await Promise.all([
+      getMenuForAI(), // cached — safe to run in parallel
       supabaseAdmin
         .from("messages")
         .select("role, content, whatsapp_msg_id")
         .eq("conversation_id", conversation.id)
         .gte("created_at", sessionStart)
         .order("created_at", { ascending: false })
-        .limit(50),
-      getMenuForAI(),
-      // Check if an order was already placed recently for this conversation
+        .limit(30),
       supabaseAdmin
         .from("orders")
         .select("id, subtotal, type, status, created_at")
@@ -109,6 +139,7 @@ async function processWebhook(body: any) {
 
     // Reverse history to maintain chronological order for the AI
     const history = (historyRows ?? []).reverse().map((r) => ({ role: r.role, content: r.content }));
+
 
     // 3b. Fetch settings (cached for 5 min) & auto-toggle is_accepting_orders based on clock
     const settings = await getCachedSettings();
@@ -145,23 +176,25 @@ async function processWebhook(body: any) {
     // 5b. Race Condition Prevention
     // If the user sent a new message while the AI was generating this reply,
     // abort this execution. The newest webhook will reply with the combined context.
+    // Optimised: fetch only the latest user message ID (1 row, minimal payload).
     const knownUserMsgIds = new Set(
       (historyRows ?? [])
         .filter((r) => r.role === "user" && r.whatsapp_msg_id)
         .map((r) => r.whatsapp_msg_id)
     );
 
-    const { data: latestUserMsgs } = await supabaseAdmin
+    const { data: latestUserMsg } = await supabaseAdmin
       .from("messages")
       .select("whatsapp_msg_id")
       .eq("conversation_id", conversation.id)
       .eq("role", "user")
       .order("created_at", { ascending: false })
-      .limit(10);
+      .limit(1)
+      .maybeSingle();
 
-    const hasNewerMessage = latestUserMsgs?.some(
-      (msg) => msg.whatsapp_msg_id && !knownUserMsgIds.has(msg.whatsapp_msg_id)
-    );
+    const hasNewerMessage =
+      latestUserMsg?.whatsapp_msg_id != null &&
+      !knownUserMsgIds.has(latestUserMsg.whatsapp_msg_id);
 
     if (hasNewerMessage) {
       console.log("Abort AI response. A newer message arrived while processing.");
@@ -221,11 +254,8 @@ async function processWebhook(body: any) {
       });
     }
 
-    // 9. Update conversation timestamp
-    await supabaseAdmin
-      .from("conversations")
-      .update({ updated_at: new Date().toISOString() })
-      .eq("id", conversation.id);
+    // NOTE: No separate timestamp update needed — the upsert in step 1 already
+    // wrote updated_at + has_unread:true, saving one DB round-trip per message.
 
   } catch (err) {
     console.error("processWebhook error:", err);

@@ -565,9 +565,7 @@ If an item is not listed above, it does not exist on our menu.
   // Free OpenRouter models tried in order.
   // All verified slugs — if one rate-limits or is unavailable, next is used.
   const MODEL_CHAIN = [
-    "meta-llama/llama-3.3-70b-instruct:free",    // primary: best free instruction-following
-    "qwen/qwen3-next-80b-a3b-instruct:free",      // fallback 1: large Qwen3 model
-    "openrouter/auto",                              // fallback 2: OpenRouter picks best available free model
+    "openrouter/auto", // OpenRouter picks the best available free model automatically
   ];
 
   // Codes that mean "this model isn't available right now — try the next one"
