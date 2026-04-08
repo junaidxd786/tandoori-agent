@@ -35,18 +35,34 @@ export async function sendWhatsAppMessage(to: string, body: string) {
 }
 
 export const STATUS_MESSAGES: Record<string, string> = {
-  preparing: "👨‍🍳 Aapka order prepare ho raha hai! Thoda wait karein.",
+  preparing: "👨‍🍳 Your order is being prepared! Sit tight, it won't be long. 😊",
   out_for_delivery:
-    "🛵 Aapka order raste mein hai! Thodi der mein pahunch jaye ga.",
+    "🛵 Your order is on its way! It'll be with you shortly.",
   delivered:
-    "✅ Aapka order deliver ho gaya! Shukriya Tandoori choose karne ka 🍗❤️",
+    `✅ Your order has been delivered! Thank you for choosing ${process.env.NEXT_PUBLIC_APP_NAME || "us"} 🍗❤️`,
   cancelled:
-    "❌ Aapka order cancel ho gaya. Kisi masle ke liye call karein: 0341-1007722",
+    `❌ Your order has been cancelled. For any queries, please call: ${process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "our support line"}.`,
 };
 
-export async function notifyCustomer(phone: string, status: string) {
+export async function notifyCustomer(
+  phone: string,
+  status: string,
+  conversationId?: string
+) {
   const message = STATUS_MESSAGES[status];
-  if (message) {
-    await sendWhatsAppMessage(phone, message);
+  if (!message) return;
+
+  // 1. Send WhatsApp message
+  await sendWhatsAppMessage(phone, message);
+
+  // 2. Persist to messages table so the dashboard conversation tab shows it
+  if (conversationId) {
+    const { supabaseAdmin } = await import("@/lib/supabase-admin");
+    const { error } = await supabaseAdmin.from("messages").insert({
+      conversation_id: conversationId,
+      role: "assistant",
+      content: message,
+    });
+    if (error) console.error("[notifyCustomer] Failed to persist status message:", error);
   }
 }

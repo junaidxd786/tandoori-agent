@@ -229,7 +229,7 @@ async function processWebhook(body: any) {
 
   } catch (err) {
     console.error("processWebhook error:", err);
-    
+
     // Recovery Phase: Try to gracefully notify the user if possible
     try {
       const entry = body?.entry?.[0];
@@ -241,7 +241,25 @@ async function processWebhook(body: any) {
         if (from) {
           console.log("Sending fallback message to", from);
           const fallbackPhone = process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "our support line";
-          await sendWhatsAppMessage(from, `⚠️ Mujhay kuch technical masla aa raha hai (System busy). Baraye meharbani thodi der baad try karein ya call karein: ${fallbackPhone}.`);
+          const fallbackContent = `⚠️ Mujhay kuch technical masla aa raha hai (System busy). Baraye meharbani thodi der baad try karein ya call karein: ${fallbackPhone}.`;
+
+          await sendWhatsAppMessage(from, fallbackContent);
+
+          // ── Persist fallback message to DB so dashboard shows it ──────────
+          const { data: conv } = await supabaseAdmin
+            .from("conversations")
+            .select("id")
+            .eq("phone", from)
+            .maybeSingle();
+
+          if (conv?.id) {
+            const { error: insertErr } = await supabaseAdmin.from("messages").insert({
+              conversation_id: conv.id,
+              role: "assistant",
+              content: fallbackContent,
+            });
+            if (insertErr) console.error("Failed to persist fallback message:", insertErr);
+          }
         }
       }
     } catch (fallbackErr) {

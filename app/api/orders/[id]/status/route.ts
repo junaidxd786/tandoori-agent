@@ -35,10 +35,11 @@ export async function PATCH(
     return NextResponse.json({ error: error?.message ?? "Not found" }, { status: 500 });
   }
 
-  // Notify customer via WhatsApp
+  // Notify customer via WhatsApp and persist to conversation history
   const phone = (order as any).conversations?.phone;
+  const conversationId = (order as any).conversation_id;
   if (phone) {
-    await notifyCustomer(phone, status).catch((e) =>
+    await notifyCustomer(phone, status, conversationId).catch((e) =>
       console.error("Notify customer error:", e)
     );
   }
