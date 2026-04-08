@@ -1,7 +1,6 @@
 import { supabaseAdmin } from "./supabase-admin";
 import { invalidateCacheByPrefix } from "./cache";
 
-
 export type MenuItem = {
   id?: string;
   name: string;
@@ -12,13 +11,18 @@ export type MenuItem = {
 };
 
 /**
- * Fetch all available menu items formatted for the AI
- */
-/**
- * Fetch all available menu items from Supabase.
- * Always fetches live — no in-memory cache (Next.js route isolation means
- * cache busting from menu/route.ts would never reach the webhook's cache instance).
- * Returns null if DB is empty or errored.
+ * Fetch all available menu items and format them for the AI context window.
+ *
+ * Format chosen deliberately:
+ *   ### Category
+ *     • Item Name — Rs. 850
+ *
+ * The bullet + em-dash (—) separator is visually distinctive and unambiguous.
+ * The model cannot confuse "—" with a price range or a colon-separated key/value.
+ *
+ * Always fetches live from Supabase — no in-memory cache.
+ * Next.js serverless route isolation means a cache set in one request cannot be
+ * read by a different route handler, so caching here would silently serve stale data.
  */
 export async function getMenuForAI(): Promise<string | null> {
   const { data, error } = await supabaseAdmin
@@ -29,33 +33,40 @@ export async function getMenuForAI(): Promise<string | null> {
     .order("name", { ascending: true });
 
   if (error) {
-    console.error("Error fetching menu for AI:", error);
+    console.error("[getMenuForAI] Supabase error:", error);
     return null;
   }
 
-  if (!data || data.length === 0) {
-    return null;
-  }
+  if (!data || data.length === 0) return null;
 
-  const groupedMenu = data.reduce((acc: any, item) => {
-    const cat = item.category || "General";
+  const grouped = data.reduce((acc: Record<string, string[]>, item) => {
+    const cat = item.category?.trim() || "General";
     if (!acc[cat]) acc[cat] = [];
-    acc[cat].push(`${item.name}: Rs. ${item.price}`);
+    // Rs. value stored as numeric — ensure no floating-point artefacts (e.g. 850.00 → 850)
+    const price = Number.isInteger(item.price)
+      ? item.price
+      : parseFloat(item.price.toFixed(2));
+    acc[cat].push(`  • ${item.name} — Rs. ${price}`);
     return acc;
   }, {});
 
-  return Object.entries(groupedMenu)
-    .map(([cat, items]) => `### ${cat}\n${(items as string[]).join("\n")}`)
-    .join("\n\n");
+  const lines = Object.entries(grouped).map(
+    ([cat, items]) => `### ${cat}\n${items.join("\n")}`
+  );
+
+  return lines.join("\n\n");
 }
 
-
+/**
+ * Replace the entire menu_items table with a new set of items.
+ * Called after a successful image extraction in the dashboard.
+ */
 export async function updateMenuFromExtraction(items: MenuItem[]) {
-  // 1. Delete all existing items (since this is a full menu update)
+  // Delete all rows (the neq trick avoids a missing WHERE clause error in Supabase)
   const { error: deleteError } = await supabaseAdmin
     .from("menu_items")
     .delete()
-    .neq("id", "00000000-0000-0000-0000-000000000000"); // Standard "delete all" trick
+    .neq("id", "00000000-0000-0000-0000-000000000000");
 
   if (deleteError) throw deleteError;
 
@@ -65,13 +76,10 @@ export async function updateMenuFromExtraction(items: MenuItem[]) {
 
   if (insertError) throw insertError;
 
-  // 3. Clear the cache
+  // Bust any application-level caches keyed on "menu_"
   invalidateCacheByPrefix("menu_");
 }
 
-/**
- * Log a new menu upload attempt
- */
 export async function createMenuUpload(imageUrl: string) {
   const { data, error } = await supabaseAdmin
     .from("menu_uploads")
@@ -83,9 +91,6 @@ export async function createMenuUpload(imageUrl: string) {
   return data;
 }
 
-/**
- * Update the status of a menu upload
- */
 export async function updateMenuUploadStatus(
   id: string,
   status: "processing" | "completed" | "error",

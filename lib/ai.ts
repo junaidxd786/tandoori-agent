@@ -1,23 +1,25 @@
 import OpenAI from "openai";
+import { getRestaurantSettings, RestaurantSettings } from "./settings";
 
 const client = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY,
 });
 
-import { getRestaurantSettings, isWithinOperatingHours, RestaurantSettings } from "./settings";
-
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
-/** Strip markdown headers from menu strings so the AI never sees ### syntax */
+/**
+ * Strip raw ### markdown headers from the menu string so the AI never sees
+ * them in the formatted output.  We replace them with *Category:* (WhatsApp bold).
+ */
 const cleanMenuSection = (raw: string): string =>
   raw.replace(/^### (.+)$/gm, "*$1:*");
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // System Prompt
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
 export const getSystemPrompt = (
   settings: RestaurantSettings,
@@ -27,186 +29,278 @@ export const getSystemPrompt = (
   const appName = process.env.NEXT_PUBLIC_APP_NAME || "Restaurant";
   const address = process.env.NEXT_PUBLIC_APP_ADDRESS || "";
   const city = process.env.NEXT_PUBLIC_APP_CITY || "";
-  const deliveryPhone = process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "";
-  const dineinPhone = process.env.NEXT_PUBLIC_APP_PHONE_DINEIN || "";
+  const phoneDelivery = process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "";
+  const phoneDineIn = process.env.NEXT_PUBLIC_APP_PHONE_DINEIN || "";
   const personality = process.env.NEXT_PUBLIC_AI_PERSONALITY || "Warm & Professional";
 
-  const minAmountInfo = settings.min_delivery_amount && settings.min_delivery_amount > 0
-    ? `- *Min Delivery Order:* Rs. ${settings.min_delivery_amount}`
-    : ``;
+  const hasDeliveryFee =
+    settings.delivery_enabled && settings.delivery_fee > 0;
 
-  // delivery_enabled = true  → a delivery fee is charged
-  // delivery_enabled = false → delivery is FREE (no fee)
-  const deliveryFeeInfo = settings.delivery_enabled && settings.delivery_fee > 0
-    ? `- *Delivery Fee:* Rs. ${settings.delivery_fee} (charged on delivery orders)`
-    : `- *Delivery Fee:* Free 🎉`;
+  const deliveryFeeDisplay = hasDeliveryFee
+    ? `Rs. ${settings.delivery_fee}`
+    : "Free 🎉";
 
-  // Hard closed guard — placed at the very top of the prompt so the AI
-  // reads this BEFORE any other instruction and cannot contradict it.
+  const deliveryFeeRule = hasDeliveryFee
+    ? `A delivery fee of Rs. ${settings.delivery_fee} applies to every delivery order. Always add this to the total shown to the customer and pass delivery_fee=${settings.delivery_fee} in place_order.`
+    : `Delivery is FREE. Always pass delivery_fee=0 in place_order. Never mention a delivery charge.`;
+
+  const minOrderInfo =
+    settings.min_delivery_amount && settings.min_delivery_amount > 0
+      ? `Minimum delivery order: Rs. ${settings.min_delivery_amount}. Politely reject delivery orders below this amount and ask the customer to add more items.`
+      : "";
+
+  // ── CLOSED GUARD ─────────────────────────────────────────────────────────
+  // Placed first in the prompt so the model reads it before anything else.
   const closedGuard = !isOpenNow
     ? `
-=== CRITICAL OVERRIDE — READ FIRST ===
-The restaurant is CLOSED right now. Operating hours: ${settings.opening_time} – ${settings.closing_time}.
-YOUR FIRST SENTENCE must inform the user we are currently CLOSED.
-- NEVER say "we are open". NEVER say "Yes we are open".
-- NEVER call place_order. All order placement is BLOCKED.
-- If asked about menu items, you may answer the question BUT immediately remind them we are closed and orders are not accepted right now.
-- Tell the user we will open at ${settings.opening_time}.
-=== END CRITICAL OVERRIDE ===
+╔══════════════════════════════════════════════════╗
+║  CRITICAL OVERRIDE — RESTAURANT IS CLOSED        ║
+╚══════════════════════════════════════════════════╝
+Operating hours: ${settings.opening_time} – ${settings.closing_time}
+The restaurant is CLOSED right now.
+
+MANDATORY RULES WHILE CLOSED:
+• Your FIRST sentence MUST say we are currently closed.
+• NEVER say "we are open". NEVER say "yes, we accept orders".
+• NEVER call place_order under any circumstances.
+• You MAY describe menu items if asked, but immediately remind the
+  customer that orders are not accepted until ${settings.opening_time}.
+• If the customer insists, politely repeat that we are closed and
+  give the phone number: ${phoneDelivery}.
 `
-    : ``;
+    : "";
 
   return `${closedGuard}
-Current Date and Time: ${new Date().toISOString()}
+Current Date & Time: ${new Date().toISOString()}
 
-You are the official WhatsApp ordering assistant for Tandoori Restaurant — ${city}.
+You are the official WhatsApp ordering assistant for *${appName}* — ${city}.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FORMAT RULES — STRICTLY ENFORCED
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-You are on WhatsApp. Follow these rules on every single reply:
-- ONLY allowed bold: *single asterisks* (e.g. *Item Name*)
-- NEVER use: ## or ### headers, **double asterisks**, _underscores\`, \`backticks\`, or numbered lists with dots (1. 2. 3.)
-- Use dash bullet points ( - ) for lists
-- Keep every reply under 5 lines. If more is needed, split into multiple short messages (EXCEPTION: Your order summary can exceed 5 lines)
-- NEVER output a wall of text. Short, conversational, mobile-friendly
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1 — PRICE GROUNDING  ⚠️ READ FIRST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+A LIVE MENU block is injected into this conversation by the system.
+That block is the ONLY valid source of item names and prices.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RESTAURANT INFO
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- *Name:* ${appName} — ${city}
-- *Address:* ${address}
-- *Hours:* ${settings.opening_time} – ${settings.closing_time}
-- *Status:* ${isOpenNow ? "OPEN ✅ — accepting orders" : "CLOSED ❌ — NOT accepting orders"}
-- *Delivery phone:* ${deliveryPhone}
-- *Dine-in phone:* ${dineinPhone}
-${minAmountInfo}
-${deliveryFeeInfo}
+RULES — enforced on every single reply:
+1. Before stating any price, find the item in the LIVE MENU block and
+   copy its Rs. value exactly. Do not recall, estimate, or calculate.
+2. If an item is not in the LIVE MENU block, it does not exist.
+   Say "Sorry, that item isn't on our menu."
+3. Never invent a price. Never guess. Never round.
+4. If the LIVE MENU block is missing or empty, tell the customer the
+   menu is temporarily unavailable and ask them to try again shortly
+   or call ${phoneDelivery}.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PERSONALITY & GREETING
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2 — FORMAT RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You are on WhatsApp. Follow every rule below on every reply:
+• Bold:    *single asterisks* only  (e.g. *Item Name*)
+• Bullets: use dash ( - ) for lists
+• NEVER use: ## headers, ### headers, **double asterisks**,
+  _underscores_, \`backticks\`, or numbered lists with dots (1. 2.)
+• Keep replies short and conversational — 3 to 5 lines is ideal.
+  Order summaries and full category listings may be longer.
+• Never send a wall of unbroken text. One idea per message.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3 — RESTAURANT INFO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- *Name:*       ${appName} — ${city}
+- *Address:*    ${address}
+- *Hours:*      ${settings.opening_time} – ${settings.closing_time}
+- *Status:*     ${isOpenNow ? "OPEN ✅ — accepting orders" : "CLOSED ❌ — not accepting orders"}
+- *Delivery:*   ${phoneDelivery}
+- *Dine-in:*    ${phoneDineIn}
+- *Delivery fee:* ${deliveryFeeDisplay}${settings.min_delivery_amount && settings.min_delivery_amount > 0 ? `\n- *Min delivery order:* Rs. ${settings.min_delivery_amount}` : ""}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4 — PERSONALITY & LANGUAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Tone: ${personality}
+
+GREETING:
 ${hasHistory
-      ? "The conversation is already ongoing. Do NOT re-greet. Answer the current message directly."
-      : `First message only: Start with "Assalam o Alaikum! 👋 Welcome to *${appName}* — ${city}. How can I help you today?"`
+      ? `The conversation is already in progress. Do NOT re-greet. Answer the current message directly.`
+      : `First message only: Begin with "Assalam o Alaikum! 👋 Welcome to *${appName}* — ${city}. How can I help you today?"`
     }
 
-LANGUAGE: Detect whether the user writes in English or Roman Urdu and mirror their language exactly throughout the entire conversation.
-- If the user greets with "Aoa", "aoa", or "Assalam o alaikum", ALWAYS reply with "Walaikum Assalam!"
+LANGUAGE DETECTION:
+- Detect whether the user writes in English or Roman Urdu and mirror
+  their language exactly for the entire conversation.
+- If the user greets with "aoa", "Aoa", "AOA", or "assalam o alaikum",
+  ALWAYS reply with "Walaikum Assalam!" as your opening word.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-MENU RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- If asked for the "menu" generically: list CATEGORY NAMES only (one per line). Ask which category they want to see.
-- If a specific category or item is requested: show those items and prices.
-- Format each item as:  - *Item Name* — Rs. XXXX
-- ALWAYS use the EXACT spelling and name of the item as it appears in the menu context. If the user misspells an item or uses a nickname, map it to the exact canonical menu name before placing the order.
-- If an item is not on the menu, say so politely. NEVER invent items or prices.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5 — MENU DISPLAY RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- "Show menu" / "menu" (generic): list CATEGORY NAMES only, one per
+  line. Then ask which category they'd like to see.
+- Specific category requested: list all items in that category with
+  prices from the LIVE MENU block.
+- Item price question: look up the item in LIVE MENU and reply with
+  the exact price. Never paraphrase the price.
+- Display format for items:
+    - *Item Name* — Rs. XXXX
+- ALWAYS use the exact item name as it appears in the LIVE MENU block.
+  If the customer uses a nickname or misspells, map to the canonical
+  menu name (e.g. "zinger" → "Zinger Burger") before ordering.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ORDER WORKFLOW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Follow these steps in order. Skip steps if the user has already provided the information upfront (e.g. if they already gave their order type or address, do not ask for it again).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6 — ORDER WORKFLOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Work through these steps in order. Skip any step the customer has
+already addressed upfront (e.g. they gave the address in their first
+message — do not ask for it again).
 
-1. *Build the order*
-   - Acknowledge each item addition gracefully (e.g., 'Got it, added to your cart.'). Do not use the word 'confirmed' for individual items.
-   - Keep a running total visible to the user
-   - If the user provides items, quantity, type, and address in a single message, beautifully acknowledge it and jump to Step 4.
+STEP 1 — Build the cart
+  - Acknowledge each item: "Got it! Added *[Item]* to your cart."
+  - Never use the word "confirmed" for individual item additions.
+  - Keep a running subtotal visible to the customer.
+  - Look up every price from the LIVE MENU block before quoting it.
 
-2. *Suggest add-ons*
-   - Ask: "Would you like anything else?"
+STEP 2 — Suggest add-ons
+  - Ask once: "Would you like anything else?"
+  - If the customer declines, move to Step 3.
 
-3. *Ask order type*
-   - Delivery → ask for full delivery address
-   - Dine-in  → ask for preferred time and number of guests
+STEP 3 — Order type
+  - Ask: Delivery or Dine-in?
+  - Delivery → ask for the full delivery address.
+  - Dine-in  → ask for preferred time and number of guests.
+  ${minOrderInfo ? `- DELIVERY MINIMUM: ${minOrderInfo}` : ""}
 
-4. *Show order summary* in this exact format before confirming:
+STEP 4 — Show order summary
+  Present the following block before asking for confirmation:
 
-*Your Order:*
-- [Item] x[qty] — Rs. [price]
-*Subtotal: Rs. [subtotal]*${settings.delivery_enabled && settings.delivery_fee > 0 ? `
-*Delivery Fee: Rs. ${settings.delivery_fee}*
-*Total: Rs. [subtotal + fee]*` : `
-*Delivery: Free 🎉*`}
-*Type:* [Delivery / Dine-in]
-*[Address OR Time & Guests]*
+  *Your Order:*
+  - [Item] x[qty] — Rs. [price × qty]
+  ...
+  *Subtotal: Rs. [sum]*${hasDeliveryFee ? `\n  *Delivery Fee: Rs. ${settings.delivery_fee}*\n  *Total: Rs. [subtotal + ${settings.delivery_fee}]*` : `\n  *Delivery: Free 🎉*`}
+  *Type:* [Delivery / Dine-in]
+  *[Delivery: Address | Dine-in: Time & Guests]*
 
-Reply *Yes* to confirm your order.
+  End with: "Reply *Yes* to confirm your order."
 
-5. *Wait for confirmation*
-   - Only call place_order AFTER the user replies "Yes" (or Roman Urdu equivalent like "haan", "ji", "confirm", "done", "theek", "thik", "bilkul", "haan burgers wala" or any affirmative phrase)
-   - If they say "No" or want to change something, go back to step 1
-   - CRITICAL: When you call the place_order tool, you MUST ALSO include a text reply in the SAME response. Never call the tool without text.
-   - The confirmation text MUST be: "✅ Your order has been placed! We'll be with you shortly. For queries call ${deliveryPhone}"
+STEP 5 — Wait for confirmation
+  - Call place_order ONLY after the customer explicitly confirms.
+  - Accepted confirmations: "Yes", "haan", "ji", "confirm", "done",
+    "theek", "thik", "bilkul", "okay", "ok", "sure", or any clear
+    affirmative — including phrases like "haan burgers wala".
+  - NOT a confirmation: silence, a new question, or changing the order.
+  - If the customer says "No" or wants to change something → go back
+    to Step 1 and update the cart.
+  - CRITICAL: When calling place_order you MUST include a text reply
+    in the SAME response. The text MUST be exactly:
+    "✅ Your order has been placed! We'll be with you shortly. For queries call ${phoneDelivery}"
 
-6. *Post-order state (after order is placed)*
-   - The order is now in our system. Your job is DONE for this order.
-   - Do NOT call place_order again. The system will BLOCK duplicate orders anyway.
-   - If the user asks "is it confirmed?", "what happened?", or similar → reassure them: "✅ Yes, your order is confirmed! For any queries call ${deliveryPhone}"
-   - If the user says "I want to order something else" or clearly starts a NEW order → you may start a fresh order flow from step 1.
-   - If user just chats casually after order → respond warmly but do NOT re-trigger the order flow.
+STEP 6 — Post-order state
+  - The order is in the system. Your job for this order is complete.
+  - Do NOT call place_order again. The system blocks duplicates anyway.
+  - "Is my order confirmed?" → "✅ Yes, confirmed! For queries call ${phoneDelivery}"
+  - "I want to order something else" / new order request → start
+    fresh from Step 1.
+  - Casual chat after order → respond warmly, do not re-trigger the flow.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ORDER MODIFICATIONS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- "Remove [item]" → remove it from the cart, show updated total
-- "Change [item] to [qty]" → update the quantity, show updated total
-- Always acknowledge the change before moving on
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7 — ORDER MODIFICATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- "Remove [item]"         → remove it, show updated total.
+- "Change [item] to [qty]"→ update quantity, show updated total.
+- "Cancel my order" (before confirmation) → reset the cart, confirm
+  cancelled: "No problem! Your cart has been cleared. 😊"
+- "Cancel" (after place_order was called) → inform the customer the
+  order is in the system and they must call ${phoneDelivery} to cancel.
+- Always acknowledge the change before moving on.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OFF-TOPIC & EDGE CASES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- If the user asks something unrelated to food, orders, or the restaurant: politely redirect.
-  Example: "I can only help with menu and order questions 😊 What would you like to eat?"
-- If the user is rude: remain calm and professional. Do not engage with insults.
-- If unsure about something: say you don't know rather than guessing.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 8 — EDGE CASES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Off-topic question: "I can only help with menu and order questions 😊
+  What would you like to eat?"
+- Rude customer: remain calm and professional. Do not engage with insults.
+- "Same as last time": explain you don't have order history and ask
+  them to place a fresh order.
+- Item unavailable mid-order: "Sorry, [item] is currently unavailable.
+  Can I suggest something else?"
+- Unsure about anything: say you don't know — never guess.
+- Non-text message (image, audio, etc.): handled upstream; if reached,
+  ask the customer to send a text message.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ABSOLUTE RULES — NEVER BREAK
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- NEVER return an empty response. You MUST ALWAYS reply with at least one sentence.
-- NEVER invent prices, items, or order IDs
-- NEVER call place_order before explicit user confirmation
-- NEVER call place_order more than once per confirmed order
-- NEVER accept orders when the restaurant is CLOSED
-- NEVER accept delivery orders below the Minimum Delivery Amount
-- NEVER use markdown headers or double-asterisk bold
-- DELIVERY FEE RULE: ${settings.delivery_enabled && settings.delivery_fee > 0 ? `A delivery fee of Rs. ${settings.delivery_fee} applies. ALWAYS pass delivery_fee=${settings.delivery_fee} in place_order for delivery orders.` : 'Delivery is FREE. ALWAYS pass delivery_fee=0 in place_order for delivery orders.'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 9 — ABSOLUTE RULES (NEVER BREAK)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✗ NEVER return an empty response — always reply with at least one sentence.
+✗ NEVER state a price not found verbatim in the LIVE MENU block.
+✗ NEVER invent items, prices, or order IDs.
+✗ NEVER call place_order before explicit customer confirmation.
+✗ NEVER call place_order more than once per confirmed order.
+✗ NEVER accept orders when the restaurant is CLOSED.
+✗ NEVER accept a delivery order below the minimum amount (if set).
+✗ NEVER use ## or ### headers or **double-asterisk** bold in replies.
+✗ ${deliveryFeeRule}
 `.trim();
 };
 
-// ---------------------------------------------------------------------------
-// AI Tool Definitions
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Tool Definitions
+// ─────────────────────────────────────────────────────────────────────────────
 
 export const tools: OpenAI.Chat.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
       name: "place_order",
-      description: "Submit the final confirmed order to the system. Only call this after the user has explicitly confirmed their order summary.",
+      description:
+        "Submit the final confirmed order to the kitchen system. " +
+        "Call this ONLY after the customer has explicitly confirmed the order summary. " +
+        "Prices MUST be copied from the LIVE MENU block — do not recall or estimate them. " +
+        "The backend validates every price against the database and will reject mismatches.",
       parameters: {
         type: "object",
         properties: {
           items: {
             type: "array",
+            description: "Line items in the order.",
             items: {
               type: "object",
               properties: {
-                name: { type: "string" },
-                qty: { type: "number" },
-                price: { type: "number" },
+                name: { type: "string", description: "Exact item name from the LIVE MENU block." },
+                qty: { type: "number", description: "Quantity ordered (positive integer)." },
+                price: { type: "number", description: "Unit price in Rs, copied verbatim from the LIVE MENU block." },
               },
               required: ["name", "qty", "price"],
             },
           },
-          type: { type: "string", enum: ["delivery", "dine-in"] },
-          subtotal: { type: "number", description: "Sum of all items (price × qty). Do NOT include delivery fee here." },
-          delivery_fee: { type: "number", description: "Delivery fee in rupees. For delivery orders set this to the configured delivery fee. For dine-in always set to 0." },
-          address: { type: "string", description: "Required for delivery orders" },
-          guests: { type: "number", description: "Required for dine-in orders" },
-          time: { type: "string", description: "Required for dine-in orders. Must be an ISO-8601 string (e.g. 2026-04-07T20:00:00Z) calculated from the Current Date and Time." },
+          type: {
+            type: "string",
+            enum: ["delivery", "dine-in"],
+            description: "Order type.",
+          },
+          subtotal: {
+            type: "number",
+            description:
+              "Sum of (price × qty) for all items. Do NOT include the delivery fee.",
+          },
+          delivery_fee: {
+            type: "number",
+            description:
+              "Delivery fee in Rs. For delivery orders use the configured fee. For dine-in always pass 0.",
+          },
+          address: {
+            type: "string",
+            description: "Full delivery address. Required for delivery orders.",
+          },
+          guests: {
+            type: "number",
+            description: "Number of guests. Required for dine-in orders.",
+          },
+          time: {
+            type: "string",
+            description:
+              "Reservation time as an ISO-8601 string (e.g. 2026-04-07T20:00:00Z), " +
+              "calculated from the Current Date & Time shown in the system prompt. " +
+              "Required for dine-in orders.",
+          },
         },
         required: ["items", "type", "subtotal", "delivery_fee"],
       },
@@ -214,9 +308,9 @@ export const tools: OpenAI.Chat.ChatCompletionTool[] = [
   },
 ];
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Process Menu Image
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
 export async function processMenuImage(imageUrl: string) {
   const completion = await client.chat.completions.create({
@@ -225,17 +319,21 @@ export async function processMenuImage(imageUrl: string) {
     messages: [
       {
         role: "system",
-        content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
-Extract EVERY SINGLE item from this menu image across all columns.
+        content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"
+          }.
 
-RULES:
-1. STRIP item numbers from the names (e.g. "1 BBQ WINGS" becomes "BBQ Wings").
-2. KEEP portion/quantity info in the name (e.g. "Chicken Karahi (Full)").
-3. ASSIGN the correct category for every item based on the headers (e.g. "STARTERS", "BBQ", "SEA FOOD").
+Extract EVERY SINGLE item visible in this menu image across all columns and sections.
+
+STRICT RULES:
+1. STRIP item numbers from names  (e.g. "1 BBQ Wings" → "BBQ Wings").
+2. KEEP portion/size info in the name  (e.g. "Chicken Karahi (Full)").
+3. ASSIGN the exact category shown by the section header  (e.g. "BBQ", "Starters", "Sea Food").
 4. CLEAN names to Title Case.
-5. FORMAT COMPACTLY to save tokens. Do not add any extra whitespace to the JSON response.
+5. price MUST be a plain number — no currency symbols, no commas  (e.g. 850 not Rs.850).
+6. If a price is illegible or ambiguous, set price to null — do NOT guess.
+7. Return compact JSON only — no preamble, no markdown, no extra whitespace.
 
-Return a JSON object with an "items" key containing the array: { name, price, category }.`,
+Return: { "items": [ { "name": "...", "price": 850, "category": "..." }, ... ] }`,
       },
       {
         role: "user",
@@ -248,174 +346,180 @@ Return a JSON object with an "items" key containing the array: { name, price, ca
     response_format: { type: "json_object" },
   });
 
-  const content = completion.choices[0].message.content ?? "{}";
+  const raw = completion.choices[0].message.content ?? "{}";
   let data: any;
   try {
-    data = JSON.parse(content);
-  } catch (error) {
-    console.error("AI JSON Parse Error. Raw content:", content);
-    throw new Error("The AI provided an invalid menu format. Please try again.");
+    data = JSON.parse(raw);
+  } catch {
+    console.error("[processMenuImage] JSON parse error. Raw:", raw);
+    throw new Error("The AI returned an invalid format. Please try again.");
   }
-  
-  if (data.items && Array.isArray(data.items)) return data.items;
-  if (Array.isArray(data)) return data;
-  const arrayValue = Object.values(data).find((v) => Array.isArray(v));
-  // Issue #9: if the AI returns valid JSON but no array anywhere, surface an error
-  // instead of silently returning [] which makes the menu appear empty with no warning.
-  if (!arrayValue) {
-    console.error("processMenuImage: AI returned valid JSON but no array field found. Raw:", content);
-    throw new Error("The AI returned an unexpected format — no menu items array found. Please try again.");
+
+  // Normalise: accept { items: [...] }, a bare array, or any top-level array value
+  let items: any[];
+  if (data.items && Array.isArray(data.items)) {
+    items = data.items;
+  } else if (Array.isArray(data)) {
+    items = data;
+  } else {
+    const arrayVal = Object.values(data).find((v) => Array.isArray(v));
+    if (!arrayVal) {
+      console.error("[processMenuImage] No array found in response. Raw:", raw);
+      throw new Error(
+        "The AI returned an unexpected format — no items array found. Please try again."
+      );
+    }
+    items = arrayVal as any[];
   }
-  return arrayValue as any[];
+
+  // Flag null-price items — dashboard should surface these for human review
+  const nullPriceCount = items.filter((i) => i.price === null || i.price === undefined).length;
+  if (nullPriceCount > 0) {
+    console.warn(
+      `[processMenuImage] ${nullPriceCount} item(s) have null prices — manual review required.`
+    );
+  }
+
+  return items;
 }
 
-// ---------------------------------------------------------------------------
-// Get AI Reply with Tool Calling
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Get AI Reply (main entry point)
+// ─────────────────────────────────────────────────────────────────────────────
 
 export async function getAIReply(
   history: { role: string; content: string }[],
   currentMenu?: string,
   orderContext?: string | null,
-  // Issue #3: default MUST be false — fail closed so orders aren't accidentally
-  // accepted 24/7 if a caller forgets to pass this argument.
+  // Fail-closed default: if caller forgets this arg, orders are blocked.
   isOpenNow: boolean = false,
   hasHistory: boolean = false,
-  settings?: RestaurantSettings // Passed from webhook to avoid duplicate DB calls
+  settings?: RestaurantSettings
 ): Promise<OpenAI.Chat.Completions.ChatCompletionMessage & { tool_calls?: any[] }> {
 
   if (!settings) {
     settings = await getRestaurantSettings();
   }
 
+  // ── Build message array ──────────────────────────────────────────────────
   const messages: any[] = [
     { role: "system", content: getSystemPrompt(settings, hasHistory, isOpenNow) },
   ];
 
-  // ── Menu context injection ──────────────────────────────────────────────
-  const lastMsg = history[history.length - 1]?.content.toLowerCase() || "";
-
-  // Check if the conversation history has stale "menu unavailable" replies
-  // (happens when DB was empty earlier in the session but now has items)
-  const historyHasStaleDenial = history.some(
-    (m) =>
-      m.role === "assistant" &&
-      (m.content.includes("menu is currently being updated") ||
-        m.content.includes("no items available") ||
-        m.content.includes("menu unavailable"))
-  );
-
+  // ── Menu injection ───────────────────────────────────────────────────────
+  // ALWAYS inject the full menu — never a partial subset.
+  // Partial injection was the primary cause of hallucinated prices: items from
+  // other categories were missing when the user's last message matched only one
+  // category, so the model guessed prices from training data.
   if (!currentMenu) {
-    // ── DB is empty / errored ──────────────────────────────────────────
-    // Only warn about unavailability if the user is actually asking about food.
-    // For plain greetings ("Hi", "Aoa") reply normally without mentioning menu.
-    // Issue #5: The old check included `lastMsg.length > 20` as a heuristic for
-    // "probably food-related". This is a false-positive trap — a greeting like
-    // "Walaikum Assalam, how are you today?" is >20 chars and definitely NOT a food
-    // query. Removed. Rely only on explicit food-related keywords.
+    // Menu is empty or Supabase errored — warn only if the message is food-related.
+    const lastMsg = history[history.length - 1]?.content?.toLowerCase() ?? "";
     const isFoodQuery =
-      lastMsg.includes("menu") ||
-      lastMsg.includes("order") ||
-      lastMsg.includes("item") ||
-      lastMsg.includes("food") ||
-      lastMsg.includes("list") ||
-      lastMsg.includes("price") ||
-      lastMsg.includes("have") ||
-      lastMsg.includes("want") ||
-      lastMsg.includes("eat") ||
-      lastMsg.includes("khana") ||
-      lastMsg.includes("khaana") ||
-      lastMsg.includes("chahiye") ||
-      lastMsg.includes("deliver") ||
-      lastMsg.includes("show") ||
-      lastMsg.includes("available") ||
-      lastMsg.includes("suggest") ||
-      lastMsg.includes("bata");
+      /menu|order|item|food|list|price|have|want|eat|khana|khaana|chahiye|deliver|show|available|suggest|bata/.test(
+        lastMsg
+      );
 
     if (isFoodQuery) {
       messages.push({
         role: "system",
-        content: `MENU STATUS: The restaurant menu is currently empty or unavailable in the database. Politely inform the user that the menu is being updated and they should try again in a few minutes or call the restaurant directly. Do NOT invent or guess any items or prices.`,
+        content:
+          "MENU STATUS: The menu is temporarily unavailable. " +
+          "Tell the customer politely and ask them to try again in a few minutes " +
+          "or call the restaurant directly. Do NOT invent or guess any items or prices.",
       });
     }
   } else {
-    // ── Menu IS available ─────────────────────────────────────────────
-    // If old "menu unavailable" replies exist in history, correct them first
+    // Correct any stale "menu unavailable" message that may be in the history
+    const historyHasStaleDenial = history.some(
+      (m) =>
+        m.role === "assistant" &&
+        (m.content.includes("menu is currently being updated") ||
+          m.content.includes("no items available") ||
+          m.content.includes("menu unavailable") ||
+          m.content.includes("temporarily unavailable"))
+    );
+
     if (historyHasStaleDenial) {
       messages.push({
         role: "system",
-        content: `IMPORTANT CORRECTION: Previous responses in this conversation incorrectly stated the menu was unavailable. The menu IS NOW FULLY AVAILABLE. Ignore those old replies completely. Use the current menu data below to answer the user's question accurately.`,
+        content:
+          "CORRECTION: A previous reply in this conversation incorrectly stated the menu " +
+          "was unavailable. The menu IS NOW FULLY AVAILABLE. Ignore those old replies. " +
+          "Use the LIVE MENU DATA below to answer accurately.",
       });
     }
 
-    // Extract category names from the menu string
+    // Extract category names for the header list (cosmetic — used in the intro line)
     const categories =
       currentMenu
-        .match(/^### ([\w &/-]+)/gm)
-        ?.map((c) => c.replace(/^### /, "").trim()) || [];
+        .match(/^### ([\w &/\-]+)/gm)
+        ?.map((c) => c.replace(/^### /, "").trim()) ?? [];
 
-    // Issue #4: The old code used .find() and only matched the FIRST category the
-    // user mentioned. "show me burgers and pizza" would inject burgers but silently
-    // drop pizza. Now we collect ALL matched categories.
-    const requestedCats = categories.filter((c) =>
-      lastMsg.includes(c.toLowerCase())
-    );
+    const cleanedMenu = cleanMenuSection(currentMenu);
 
-    if (requestedCats.length > 0) {
-      // Inject only the requested categories' items (cleaned, no ### headers)
-      const catSections = requestedCats.map((cat) => {
-        const regex = new RegExp(`### ${cat}[\\s\\S]*?(?=### |$)`, "i");
-        const rawCatData = currentMenu.match(regex)?.[0] || "";
-        return `LIVE MENU DATA — ${cat}:\n${cleanMenuSection(rawCatData)}`;
-      });
-      messages.push({
-        role: "system",
-        content: `${catSections.join("\n\n")}\n\nAnswer the user's question using only these items and prices.`,
-      });
-    } else {
-      // Always inject full categories so AI can answer ANY food question.
-      // Issue #6: Use cleanMenuSection() on the full menu — the old code injected
-      // raw `currentMenu` (with ### headers) for the non-category path, which
-      // contradicted the point of cleanMenuSection. Now we clean it consistently.
-      const cleanedMenu = cleanMenuSection(currentMenu);
-      messages.push({
-        role: "system",
-        content: `LIVE MENU — CATEGORIES AVAILABLE:\n${categories.map((c) => `- *${c}*`).join("\n")}\n\nFULL MENU DATA (use for price/availability questions):\n${cleanedMenu}\n\nIf the user asks about a specific item, look it up above and answer accurately. If they ask to see a category, list its items with prices. Never guess prices or invent items not listed above.`,
-      });
-    }
+    messages.push({
+      role: "system",
+      content: `
+╔══════════════════════════════════════════════════╗
+║  LIVE MENU DATA  —  PRICE AUTHORITY              ║
+║  Copy prices exactly. Never guess or recall.     ║
+╚══════════════════════════════════════════════════╝
+Available categories: ${categories.map((c) => `*${c}*`).join(", ")}
+
+${cleanedMenu}
+
+RULE: Every Rs. amount you tell the customer MUST appear verbatim in the list above.
+If an item is not listed above, it does not exist on our menu.
+`.trim(),
+    });
   }
 
-  // Inject order context if provided (e.g. an order was already placed recently)
-  // This is the primary defence against duplicate orders
+  // ── Recent order context ─────────────────────────────────────────────────
+  // Primary defence against duplicate place_order calls.
   if (orderContext) {
     messages.push({ role: "system", content: orderContext });
   }
 
-  messages.push({ role: "system", content: "--- CONVERSATION HISTORY STARTS BELOW ---" });
+  messages.push({
+    role: "system",
+    content: "─── CONVERSATION HISTORY ───",
+  });
 
-  // Keep up to 50 messages to avoid losing cart context mid-order
+  // Keep last 50 messages so a long cart session doesn't lose early items.
   messages.push(...history.slice(-50));
 
+  // ── Idempotency guard ────────────────────────────────────────────────────
+  // Even if orderContext is absent, scan the history for a confirmation message.
+  // If found, disable tools unless the customer explicitly starts a NEW order.
+  let isOrderAlreadyPlaced = false;
   let lastOrderIndex = -1;
+
   for (let i = history.length - 1; i >= 0; i--) {
-    const m = history[i];
-    if (m.role === "assistant" && (
-      m.content.includes("order has been placed") ||
-      m.content.includes("order is confirmed") ||
-      m.content.includes("✅ Your order")
-    )) {
+    if (
+      history[i].role === "assistant" &&
+      (history[i].content.includes("order has been placed") ||
+        history[i].content.includes("order is confirmed") ||
+        history[i].content.includes("✅ Your order"))
+    ) {
       lastOrderIndex = i;
       break;
     }
   }
 
-  let isOrderAlreadyPlaced = false;
   if (lastOrderIndex !== -1) {
     isOrderAlreadyPlaced = true;
+    // Re-enable tools only if customer explicitly asks for a new order
     for (let i = lastOrderIndex + 1; i < history.length; i++) {
       if (history[i].role === "user") {
-        const text = history[i].content.toLowerCase();
-        if (text.includes("order again") || text.includes("order something else") || text.includes("new order") || text.includes("another order") || text.includes("add another") || text.includes("place a new order")) {
+        const t = history[i].content.toLowerCase();
+        if (
+          t.includes("order again") ||
+          t.includes("order something else") ||
+          t.includes("new order") ||
+          t.includes("another order") ||
+          t.includes("add another") ||
+          t.includes("place a new order")
+        ) {
           isOrderAlreadyPlaced = false;
           break;
         }
@@ -423,18 +527,14 @@ export async function getAIReply(
     }
   }
 
-  // Double idempotency guard: even if orderContext is missing, if we see confirmation in history, we block the tools.
   const allowTools = !orderContext && !isOrderAlreadyPlaced;
 
+  // ── Model config ─────────────────────────────────────────────────────────
   const primaryModel = process.env.AI_MODEL || "google/gemini-2.0-flash-001";
-  // Issue #10: fallbackModel was hardcoded and couldn't be overridden without a
-  // code deploy. Now reads from env — set AI_FALLBACK_MODEL in .env.local to change.
   const fallbackModel = process.env.AI_FALLBACK_MODEL || "anthropic/claude-3-haiku";
+  const maxTokens = parseInt(process.env.AI_MAX_TOKENS || "3500", 10);
 
-  // Issue #8: max_tokens was hardcoded at 2000. Large menus + 20-message history
-  // can approach context limits. Read from env so it's tunable without a deploy.
-  const maxTokens = parseInt(process.env.AI_MAX_TOKENS || "2000", 10);
-
+  // ── Primary model call ───────────────────────────────────────────────────
   try {
     const completion = await client.chat.completions.create({
       model: primaryModel,
@@ -444,46 +544,63 @@ export async function getAIReply(
     });
 
     const response = completion.choices[0].message;
-    // Safety: If the AI returns a tool call but NO content text, ensure we have a blank string instead of undefined
-    if (!response.content && !response.tool_calls) {
-       response.content = "I'm sorry, I encountered a brief glitch. How can I help you with your order?";
-    }
-    return response;
 
-  } catch (error) {
-    console.error(`AI Primary Model (${primaryModel}) failed:`, error);
-    
-    // Attempt fallback
+    // Safety: if the model returns neither content nor tool calls, inject a fallback.
+    if (!response.content && !response.tool_calls) {
+      response.content =
+        "I'm sorry, I encountered a brief glitch. How can I help you with your order?";
+    }
+
+    return response;
+  } catch (primaryError) {
+    console.error(`[AI] Primary model (${primaryModel}) failed:`, primaryError);
+
+    // ── Fallback model call ────────────────────────────────────────────────
     try {
-      console.log(`Attempting fallback with ${fallbackModel}...`);
-      // If the fallback model is Anthropic, use the native Anthropic SDK.
+      console.log(`[AI] Attempting fallback with ${fallbackModel}…`);
+
       if (fallbackModel.includes("claude")) {
+        // Use native Anthropic SDK for Claude models (better tool support)
         const Anthropic = require("@anthropic-ai/sdk").default;
-        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || process.env.OPENROUTER_API_KEY });
-        const anthropicMessages = messages.filter(m => m.role !== "system").map(m => ({ role: m.role as any, content: m.content }));
-        const systemMessage = messages.filter(m => m.role === "system").map(m => m.content).join("\n\n");
-        const completion = await anthropic.messages.create({
-          model: fallbackModel.replace("anthropic/", ""), // e.g. claude-3-haiku-20240307
+        const anthropic = new Anthropic({
+          apiKey: process.env.ANTHROPIC_API_KEY || process.env.OPENROUTER_API_KEY,
+        });
+
+        const systemContent = messages
+          .filter((m) => m.role === "system")
+          .map((m) => m.content)
+          .join("\n\n");
+
+        const anthropicMessages = messages
+          .filter((m) => m.role !== "system")
+          .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+
+        const result = await anthropic.messages.create({
+          model: fallbackModel.replace("anthropic/", ""),
           max_tokens: maxTokens,
-          system: systemMessage,
+          system: systemContent,
           messages: anthropicMessages,
         });
+
         return {
           role: "assistant",
-          content: completion.content[0].type === "text" ? completion.content[0].text : "",
+          content:
+            result.content[0]?.type === "text" ? result.content[0].text : "",
         } as any;
       }
 
-      const completion = await client.chat.completions.create({
+      // Non-Claude fallback via OpenRouter
+      const fallback = await client.chat.completions.create({
         model: fallbackModel,
         max_tokens: maxTokens,
         messages,
         ...(allowTools ? { tools, tool_choice: "auto" } : {}),
       });
-      return completion.choices[0].message;
+
+      return fallback.choices[0].message;
     } catch (fallbackError) {
-      console.error("AI Fallback failed too:", fallbackError);
-      throw error; // Re-throw original if fallback also fails
+      console.error("[AI] Fallback also failed:", fallbackError);
+      throw primaryError; // Re-throw original error for upstream handling
     }
   }
 }

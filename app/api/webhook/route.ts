@@ -186,6 +186,7 @@ async function processWebhook(body: any) {
 
     // 8. Send reply to WhatsApp & persist to DB
     if (finalContent) {
+      finalContent = await validatePricesInResponse(finalContent, deliveryPhone);
       await sendWhatsAppMessage(from, finalContent);
       await supabaseAdmin.from("messages").insert({
         conversation_id: conversation.id,
@@ -311,4 +312,35 @@ async function handlePlaceOrder(conversationId: string, args: any) {
     }
   }
 }
+
+/**
+ * Price Hallucination Backstop: Ensures every price mentioned by the AI exists in the DB
+ */
+async function validatePricesInResponse(
+  content: string,
+  fallbackPhone: string
+): Promise<string> {
+  const mentionedPrices = content.match(/Rs\.?\s*(\d+)/gi);
+  if (!mentionedPrices) return content;
+
+  const { data: menuItems } = await supabaseAdmin
+    .from("menu_items")
+    .select("price")
+    .eq("is_available", true);
+
+  if (!menuItems) return content;
+
+  const validPrices = new Set(menuItems.map((m) => Math.round(Number(m.price))));
+
+  for (const match of mentionedPrices) {
+    const num = parseInt(match.replace(/Rs\.?\s*/i, "").trim(), 10);
+    if (num < 50) continue; // skip delivery fees / small numbers
+    if (!validPrices.has(num)) {
+      console.warn(`⚠️ Hallucinated price Rs.${num} blocked`);
+      return `Sorry, I had a small glitch fetching that price. Please ask again or call ${fallbackPhone} 😊`;
+    }
+  }
+  return content;
+}
+
 
