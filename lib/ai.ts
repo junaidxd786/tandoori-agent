@@ -3,12 +3,12 @@ import { getRestaurantSettings, RestaurantSettings } from "./settings";
 
 const client = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPENROUTER_API_KEY,
+  apiKey: process.env.OPENROUTER_API_KEY || "dummy_key_to_prevent_build_crash",
 });
 
 const groqClient = new OpenAI({
   baseURL: "https://api.groq.com/openai/v1",
-  apiKey: process.env.GROQ_API_KEY,
+  apiKey: process.env.GROQ_API_KEY || "dummy_key_to_prevent_build_crash",
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
