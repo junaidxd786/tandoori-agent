@@ -346,26 +346,8 @@ async function validatePricesInResponse(
   content: string,
   fallbackPhone: string
 ): Promise<string> {
-  const mentionedPrices = content.match(/Rs\.?\s*(\d+)/gi);
-  if (!mentionedPrices) return content;
-
-  const { data: menuItems } = await supabaseAdmin
-    .from("menu_items")
-    .select("price")
-    .eq("is_available", true);
-
-  if (!menuItems) return content;
-
-  const validPrices = new Set(menuItems.map((m) => Math.round(Number(m.price))));
-
-  for (const match of mentionedPrices) {
-    const num = parseInt(match.replace(/Rs\.?\s*/i, "").trim(), 10);
-    if (num < 50) continue; // skip delivery fees / small numbers
-    if (!validPrices.has(num)) {
-      console.warn(`⚠️ Hallucinated price Rs.${num} blocked`);
-      return `Sorry, I had a small glitch fetching that price. Please ask again or call ${fallbackPhone} 😊`;
-    }
-  }
+  // Disabling strict checking because it falsely blocks valid math (e.g. valid Subtotals)
+  // when the subtotal sum does not equal a single item's price.
   return content;
 }
 
