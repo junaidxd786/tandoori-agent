@@ -6,10 +6,6 @@ const client = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY || "dummy_key_to_prevent_build_crash",
 });
 
-const groqClient = new OpenAI({
-  baseURL: "https://api.groq.com/openai/v1",
-  apiKey: process.env.GROQ_API_KEY || "dummy_key_to_prevent_build_crash",
-});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory cache — avoids a DB round-trip on every WhatsApp message
@@ -565,119 +561,53 @@ If an item is not listed above, it does not exist on our menu.
 
   // ── Model config ──────────────────────────────────────────────────────────
   const maxTokens = parseInt(process.env.AI_MAX_TOKENS || "3500", 10);
-  const googleApiKey = process.env.GOOGLE_AI_API_KEY || "";
 
-  // ── Primary model call — native Gemini Flash ──────────────────────────────
-  if (googleApiKey) {
+  // Free OpenRouter models tried in order — if one rate-limits, next is used.
+  const MODEL_CHAIN = [
+    "meta-llama/llama-3.3-70b-instruct:free",   // ~70B, excellent instruction following
+    "deepseek/deepseek-r1:free",                  // strong reasoning, great fallback
+    "qwen/qwen-2.5-72b-instruct:free",            // multilingual, handles Urdu/Roman well
+  ];
+
+  // ── Try each model in order ──────────────────────────────────────────────
+  let lastError: unknown;
+
+  for (const model of MODEL_CHAIN) {
     try {
-      // Convert OpenAI-style messages to Gemini contents format.
-      // System messages are merged into system_instruction; the rest become contents.
-      const systemParts = messages
-        .filter((m) => m.role === "system")
-        .map((m) => ({ text: m.content as string }));
+      console.log(`[AI] Trying model: ${model}`);
 
-      const contents = messages
-        .filter((m) => m.role !== "system")
-        .map((m) => ({
-          role: m.role === "assistant" ? "model" : "user",
-          parts: [{ text: m.content as string }],
-        }));
-
-      // Ensure contents is non-empty (Gemini requires at least one turn)
-      if (contents.length === 0) {
-        contents.push({ role: "user", parts: [{ text: "Hello" }] });
-      }
-
-      const geminiPayload: any = {
-        system_instruction: { parts: systemParts },
-        contents,
-        generationConfig: { maxOutputTokens: maxTokens, temperature: 0.7 },
-      };
-
-      if (allowTools) {
-        geminiPayload.tools = [
-          {
-            function_declarations: tools.map((t: any) => ({
-              name: t.function.name,
-              description: t.function.description,
-              parameters: t.function.parameters,
-            })),
-          },
-        ];
-      }
-
-      const geminiUrl =
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent` +
-        `?key=${googleApiKey}`;
-
-      const geminiRes = await fetch(geminiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(geminiPayload),
+      const completion = await client.chat.completions.create({
+        model,
+        max_tokens: maxTokens,
+        messages,
+        ...(allowTools ? { tools, tool_choice: "auto" } : {}),
       });
 
-      if (!geminiRes.ok) {
-        const errBody = await geminiRes.text();
-        throw new Error(`Gemini HTTP ${geminiRes.status}: ${errBody}`);
+      const response = completion.choices[0].message;
+
+      if (!response.content && !response.tool_calls) {
+        response.content = "I'm sorry, I encountered a brief glitch. How can I help you with your order?";
       }
 
-      const geminiData = await geminiRes.json();
-      const candidate = geminiData.candidates?.[0];
-      const parts: any[] = candidate?.content?.parts ?? [];
+      console.log(`[AI] ${model} responded successfully.`);
+      return response;
+    } catch (err: any) {
+      const status = err?.status ?? err?.response?.status;
+      const isRateLimit = status === 429 || err?.code === "rate_limit_exceeded";
 
-      const textPart = parts.find((p) => typeof p.text === "string");
-      const callPart = parts.find((p) => p.functionCall);
-
-      const result: any = {
-        role: "assistant",
-        content: textPart?.text?.trim() || null,
-      };
-
-      if (callPart) {
-        result.tool_calls = [
-          {
-            id: `call_${Date.now()}`,
-            type: "function",
-            function: {
-              name: callPart.functionCall.name,
-              arguments: JSON.stringify(callPart.functionCall.args ?? {}),
-            },
-          },
-        ];
+      if (isRateLimit) {
+        console.warn(`[AI] ${model} rate-limited (429), trying next model…`);
+        lastError = err;
+        continue; // try next model
       }
 
-      if (!result.content && !result.tool_calls) {
-        result.content = "I'm sorry, I encountered a brief glitch. How can I help you with your order?";
-      }
-
-      console.log("[AI] Gemini Flash responded successfully.");
-      return result;
-    } catch (geminiError) {
-      console.error("[AI] Gemini Flash failed, falling back to Groq:", geminiError);
-      // Fall through to Groq fallback below
+      // Non-rate-limit error — don't bother trying other models
+      console.error(`[AI] ${model} failed with non-rate-limit error:`, err);
+      throw err;
     }
-  } else {
-    console.warn("[AI] GOOGLE_AI_API_KEY not set — skipping Gemini, using Groq.");
   }
 
-  // ── Fallback model call — Groq Llama ─────────────────────────────────────
-  const groqModel = "llama-3.3-70b-versatile";
-  try {
-    const completion = await groqClient.chat.completions.create({
-      model: groqModel,
-      max_tokens: maxTokens,
-      messages,
-      ...(allowTools ? { tools, tool_choice: "auto" } : {}),
-    });
-
-    const response = completion.choices[0].message;
-    if (!response.content && !response.tool_calls) {
-      response.content = "I'm sorry, I encountered a brief glitch. How can I help you with your order?";
-    }
-    console.log("[AI] Groq fallback responded successfully.");
-    return response;
-  } catch (groqError) {
-    console.error("[AI] Groq fallback also failed:", groqError);
-    throw groqError;
-  }
+  // All models exhausted
+  console.error("[AI] All models rate-limited. Last error:", lastError);
+  throw lastError;
 }
