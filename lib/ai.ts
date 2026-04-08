@@ -546,7 +546,7 @@ If an item is not listed above, it does not exist on our menu.
   const allowTools = !orderContext && !isOrderAlreadyPlaced;
 
   // ── Model config ─────────────────────────────────────────────────────────
-  const primaryModel = process.env.AI_MODEL || "meta-llama/llama-4-maverick:free";
+  const primaryModel = process.env.AI_MODEL || "arcee-ai/trinity-large-preview:free";
   const fallbackModel = process.env.AI_FALLBACK_MODEL || "google/gemini-2.0-flash-001:free";
   const maxTokens = parseInt(process.env.AI_MAX_TOKENS || "3500", 10);
 
