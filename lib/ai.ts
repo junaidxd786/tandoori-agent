@@ -562,12 +562,20 @@ If an item is not listed above, it does not exist on our menu.
   // ── Model config ──────────────────────────────────────────────────────────
   const maxTokens = parseInt(process.env.AI_MAX_TOKENS || "3500", 10);
 
-  // Free OpenRouter models tried in order — if one rate-limits, next is used.
+  // Free OpenRouter models tried in order.
+  // All verified slugs — if one rate-limits or is unavailable, next is used.
   const MODEL_CHAIN = [
-    "meta-llama/llama-3.3-70b-instruct:free",   // ~70B, excellent instruction following
-    "deepseek/deepseek-r1:free",                  // strong reasoning, great fallback
-    "qwen/qwen-2.5-72b-instruct:free",            // multilingual, handles Urdu/Roman well
+    "meta-llama/llama-3.3-70b-instruct:free",    // primary: best free instruction-following
+    "qwen/qwen3-next-80b-a3b-instruct:free",      // fallback 1: large Qwen3 model
+    "openrouter/auto",                              // fallback 2: OpenRouter picks best available free model
   ];
+
+  // Codes that mean "this model isn't available right now — try the next one"
+  const SKIP_CODES = new Set([
+    429,  // rate limit
+    404,  // model endpoint not found / not available on free tier
+    503,  // model overloaded
+  ]);
 
   // ── Try each model in order ──────────────────────────────────────────────
   let lastError: unknown;
@@ -592,22 +600,21 @@ If an item is not listed above, it does not exist on our menu.
       console.log(`[AI] ${model} responded successfully.`);
       return response;
     } catch (err: any) {
-      const status = err?.status ?? err?.response?.status;
-      const isRateLimit = status === 429 || err?.code === "rate_limit_exceeded";
+      const status = err?.status ?? err?.error?.code ?? err?.response?.status;
 
-      if (isRateLimit) {
-        console.warn(`[AI] ${model} rate-limited (429), trying next model…`);
+      if (SKIP_CODES.has(Number(status))) {
+        console.warn(`[AI] ${model} unavailable (${status}), trying next model…`);
         lastError = err;
-        continue; // try next model
+        continue;
       }
 
-      // Non-rate-limit error — don't bother trying other models
-      console.error(`[AI] ${model} failed with non-rate-limit error:`, err);
+      // Unexpected error — fail fast
+      console.error(`[AI] ${model} failed with unexpected error (${status}):`, err?.message ?? err);
       throw err;
     }
   }
 
   // All models exhausted
-  console.error("[AI] All models rate-limited. Last error:", lastError);
+  console.error("[AI] All models in chain failed. Last error:", lastError);
   throw lastError;
 }
