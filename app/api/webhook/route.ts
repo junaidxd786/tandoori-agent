@@ -292,7 +292,7 @@ async function drainConversationQueue(conversation: ConversationRow) {
         let reply = "";
 
         if (decision.kind === "fallback") {
-          const history = await getConversationHistoryUpTo(conversation.id, nextMessage.created_at);
+          const history = await getConversationHistoryUpTo(conversation.id, nextMessage.ingest_seq);
           reply = await getCustomerSupportReply(
             history,
             menuForAI,
@@ -409,13 +409,13 @@ async function getNextPendingUserMessage(
   };
 }
 
-async function getConversationHistoryUpTo(conversationId: string, createdAt: string) {
+async function getConversationHistoryUpTo(conversationId: string, ingestSeq: number) {
   const { data, error } = await supabaseAdmin
     .from("messages")
-    .select("role, content, created_at")
+    .select("role, content, ingest_seq")
     .eq("conversation_id", conversationId)
-    .lte("created_at", createdAt)
-    .order("created_at", { ascending: false })
+    .lte("ingest_seq", ingestSeq)
+    .order("ingest_seq", { ascending: false })
     .limit(20);
 
   if (error) throw error;

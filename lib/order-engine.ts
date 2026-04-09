@@ -304,10 +304,29 @@ const AMBIGUOUS_QUERY_STOPWORDS = new Set([
   "a",
   "an",
   "and",
+  "aik",
+  "also",
+  "bhi",
+  "chahiye",
+  "de",
+  "dein",
+  "deliver",
   "the",
+  "do",
+  "dain",
+  "ek",
   "for",
+  "hai",
+  "hain",
+  "home",
+  "kar",
+  "karo",
+  "kr",
+  "main",
+  "mein",
   "with",
   "please",
+  "plz",
   "show",
   "what",
   "which",
@@ -390,6 +409,7 @@ export function decideTurn(context: TurnContext): TurnDecision {
   const state = context.state;
   const menuItems = context.menuItems;
   const orderIntent = hasOrderIntent(text);
+  const shouldBlockForClosedHours = isOrderFlowAttempt(text, state, menuItems);
   const respond = (reply: string, statePatch: Partial<ConversationState>) =>
     replyDecision(reply, statePatch, preferredLanguage);
 
@@ -409,6 +429,10 @@ export function decideTurn(context: TurnContext): TurnDecision {
         : "No problem, I cancelled the current draft order. Send any item name whenever you want to start again.",
       resetDraftState(),
     );
+  }
+
+  if (!context.isOpenNow && shouldBlockForClosedHours) {
+    return respond(buildClosedReply(context.settings, prefersRomanUrdu), {});
   }
 
   if (state.workflow_step === "awaiting_resume_decision") {
@@ -467,10 +491,6 @@ export function decideTurn(context: TurnContext): TurnDecision {
         resume_workflow_step: state.workflow_step,
       });
     }
-  }
-
-  if (!context.isOpenNow && (state.workflow_step !== "idle" || orderIntent || extractCartItems(text, menuItems, true).length > 0)) {
-    return respond(buildClosedReply(context.settings, prefersRomanUrdu), {});
   }
 
   if (state.workflow_step === "awaiting_confirmation") {
@@ -543,6 +563,11 @@ export function decideTurn(context: TurnContext): TurnDecision {
   if (state.workflow_step === "awaiting_upsell_reply") {
     const suggestedItem = getSuggestedUpsellItem(state, menuItems);
     const explicitlyAdded = extractCartItems(text, menuItems, true);
+    const bundledCheckoutDetails =
+      detectOrderType(text) != null ||
+      parseAddress(context.messageText) != null ||
+      parseGuestCount(text) != null ||
+      parseReservationTime(text) != null;
     let updatedCart = state.cart;
     let prefix = "";
 
@@ -634,6 +659,21 @@ export function decideTurn(context: TurnContext): TurnDecision {
     }
 
     if (explicitlyAdded.length === 0 && !isExplicitYes(text)) {
+      if (bundledCheckoutDetails) {
+        return buildLogisticsOrSummaryReply({
+          ...context,
+          state: {
+            ...state,
+            cart: updatedCart,
+            workflow_step: "awaiting_order_type",
+            upsell_item_name: null,
+            upsell_item_price: null,
+            preferred_language: preferredLanguage,
+          },
+          overrideReplyPrefix: prefix,
+        });
+      }
+
       return respond(
         maybeAppendCheckoutPrompt(
           prefersRomanUrdu
@@ -675,8 +715,22 @@ export function decideTurn(context: TurnContext): TurnDecision {
     }
 
     const addedItems = extractCartItems(text, menuItems, true);
+    const address = parseAddress(context.messageText);
     if (addedItems.length > 0) {
       const mergedCart = mergeCartItems(state.cart, addedItems);
+      if (address) {
+        return buildSummaryReply({
+          ...context,
+          state: {
+            ...state,
+            cart: mergedCart,
+            preferred_language: preferredLanguage,
+            order_type: "delivery",
+            address,
+          },
+        });
+      }
+
       return respond(
         [
           buildAddedItemsMessage(addedItems, prefersRomanUrdu, mergedCart),
@@ -691,7 +745,6 @@ export function decideTurn(context: TurnContext): TurnDecision {
       );
     }
 
-    const address = parseAddress(context.messageText);
     if (!address) {
       return respond(
         prefersRomanUrdu
@@ -728,8 +781,24 @@ export function decideTurn(context: TurnContext): TurnDecision {
     }
 
     const addedItems = extractCartItems(text, menuItems, true);
+    const guests = parseGuestCount(text) ?? state.guests;
+    const reservationTime = parseReservationTime(text) ?? state.reservation_time;
     if (addedItems.length > 0) {
       const mergedCart = mergeCartItems(state.cart, addedItems);
+      if (guests && reservationTime) {
+        return buildSummaryReply({
+          ...context,
+          state: {
+            ...state,
+            cart: mergedCart,
+            preferred_language: preferredLanguage,
+            order_type: "dine-in",
+            guests,
+            reservation_time: reservationTime,
+          },
+        });
+      }
+
       return respond(
         [
           buildAddedItemsMessage(addedItems, prefersRomanUrdu, mergedCart),
@@ -742,9 +811,6 @@ export function decideTurn(context: TurnContext): TurnDecision {
         },
       );
     }
-
-    const guests = parseGuestCount(text) ?? state.guests;
-    const reservationTime = parseReservationTime(text) ?? state.reservation_time;
 
     if (!guests || !reservationTime) {
       return respond(
@@ -816,7 +882,8 @@ export function decideTurn(context: TurnContext): TurnDecision {
     (!browseIntent && (hasActivePresentedCategory(state, menuItems) || requestLooksLikeItemSelection(text)));
   const additions = extractCartItems(text, contextualMenuItems, selectionAggressive);
   const fuzzyMatches = additions.length === 0 && !browseIntent ? findFuzzyMenuMatches(text, contextualMenuItems) : [];
-  const ambiguousMatches = fuzzyMatches.length > 0 ? fuzzyMatches : findAmbiguousMenuMatches(text, contextualMenuItems);
+  const exactAmbiguousMatches = findAmbiguousMenuMatches(text, contextualMenuItems);
+  const ambiguousMatches = exactAmbiguousMatches.length > 0 ? exactAmbiguousMatches : fuzzyMatches;
   const shouldPrioritizeItemSelection =
     (additions.length > 0 && !browseIntent) ||
     state.workflow_step !== "idle" ||
@@ -826,18 +893,14 @@ export function decideTurn(context: TurnContext): TurnDecision {
 
   if (fuzzyMatches.length === 1 && additions.length === 0 && !browseIntent) {
     const [match] = fuzzyMatches;
-    return handleResolvedAdditions(
-      [
-        {
-          name: match.name,
-          price: match.price,
-          qty: extractAnyQuantity(text) ?? 1,
-          category: match.category,
-        },
-      ],
-      context,
-      preferredLanguage,
-      prefersRomanUrdu,
+    return respond(
+      prefersRomanUrdu
+        ? `Kya aap *${match.name}* keh rahe hain? Agar haan, to item ka naam isi tarah bhej dein.`
+        : `Did you mean *${match.name}*? If yes, please send the item name like this.`,
+      {
+        last_presented_category: match.category,
+        last_presented_at: new Date().toISOString(),
+      },
     );
   }
 
@@ -895,6 +958,15 @@ export function decideTurn(context: TurnContext): TurnDecision {
     return buildLogisticsOrSummaryReply(context);
   }
 
+  if (orderIntent || hasExplicitQuantityHint(text)) {
+    return respond(
+      prefersRomanUrdu
+        ? "Main exact menu item match nahi kar saka. Please item ka exact naam bhej dein ya category pooch lein."
+        : "I couldn't match that exact menu item. Please send the exact item name or ask for a category first.",
+      { preferred_language: preferredLanguage },
+    );
+  }
+
   return { kind: "fallback", statePatch: { preferred_language: preferredLanguage } };
 }
 
@@ -905,7 +977,8 @@ function buildLogisticsOrSummaryReply(
   const preferredLanguage = inferPreferredLanguage(context.messageText, context.state.preferred_language);
   const prefersRomanUrdu = preferredLanguage === "roman_urdu";
   const text = normalizeText(context.messageText);
-  const detectedType = detectOrderType(text) ?? state.order_type;
+  const addressFromMessage = parseAddress(context.messageText);
+  const detectedType = detectOrderType(text) ?? state.order_type ?? (addressFromMessage ? "delivery" : null);
   const respond = (reply: string, statePatch: Partial<ConversationState>) =>
     replyDecision(reply, statePatch, preferredLanguage);
 
@@ -924,7 +997,7 @@ function buildLogisticsOrSummaryReply(
   }
 
   if (detectedType === "delivery") {
-    const maybeAddress = parseAddress(context.messageText) ?? state.address;
+    const maybeAddress = addressFromMessage ?? state.address;
     if (!maybeAddress) {
       return respond(
         [
@@ -1133,6 +1206,8 @@ function normalizeText(value: string): string {
     .toLowerCase()
     .replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\bkarai\b/g, "karahi")
+    .replace(/\bkarhai\b/g, "karahi")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1174,9 +1249,19 @@ function isGreeting(text: string): boolean {
 }
 
 function hasOrderIntent(text: string): boolean {
-  return /(\bi want\b|\bi would like\b|\bi ll take\b|\bi'll take\b|\bcan i get\b|\bget me\b|\bplease add\b|\badd\b|\border\b|\bsend\b|\bgive\b|\bneed\b|\bbhej\b|\bde do\b|\bdedo\b|\bchahiye\b|\bkrdo\b|\bkar do\b|\bbook\b|\breserve\b)/.test(
+  return /(\bi want\b|\bi would like\b|\bi ll take\b|\bi'll take\b|\bcan i get\b|\bget me\b|\bplease add\b|\badd\b|\border\b|\bsend\b|\bgive\b|\bneed\b|\bbhej\b|\bbhej dein\b|\bbhej dain\b|\bde do\b|\bdedo\b|\bchahiye\b|\bkrdo\b|\bkar do\b|\bkr dein\b|\bkr dain\b|\bkar dein\b|\bkar dain\b|\bbook\b|\breserve\b)/.test(
     text,
   );
+}
+
+function isOrderFlowAttempt(text: string, state: ConversationState, menuItems: MenuCatalogItem[]): boolean {
+  if (state.workflow_step !== "idle") return true;
+  if (hasOrderIntent(text)) return true;
+  if (extractCartItems(text, menuItems, true).length > 0) return true;
+  if (parseAddress(text) != null) return true;
+  if (detectOrderType(text) != null && (hasExplicitQuantityHint(text) || requestLooksLikeItemSelection(text))) return true;
+  if (parseGuestCount(text) != null && parseReservationTime(text) != null) return true;
+  return hasExplicitQuantityHint(text) && requestLooksLikeItemSelection(text);
 }
 
 function isGenericMenuRequest(text: string): boolean {
@@ -1267,9 +1352,10 @@ function detectOrderType(text: string): OrderType | null {
 }
 
 function parseAddress(raw: string): string | null {
-  const text = raw.trim();
-  if (!isCompleteAddress(text)) return null;
-  return text.replace(/\s+/g, " ");
+  const text = raw.trim().replace(/\s+/g, " ");
+  const extracted = extractAddressFragment(text);
+  if (!extracted) return null;
+  return extracted;
 }
 
 function isCompleteAddress(text: string): boolean {
@@ -1278,6 +1364,29 @@ function isCompleteAddress(text: string): boolean {
   const hasNumber = /\d/.test(normalized);
   const hasHint = ADDRESS_HINTS.some((hint) => normalized.includes(hint));
   return hasNumber && hasHint;
+}
+
+function extractAddressFragment(text: string): string | null {
+  const normalizedHints = ADDRESS_HINTS
+    .map((hint) => hint.toLowerCase())
+    .sort((left, right) => right.length - left.length);
+  const lowered = text.toLowerCase();
+  let earliestHintIndex = -1;
+
+  for (const hint of normalizedHints) {
+    const index = lowered.indexOf(hint);
+    if (index === -1) continue;
+    if (earliestHintIndex === -1 || index < earliestHintIndex) {
+      earliestHintIndex = index;
+    }
+  }
+
+  if (earliestHintIndex !== -1) {
+    const candidate = text.slice(earliestHintIndex).replace(/^[,\s:-]+/, "").trim();
+    if (isCompleteAddress(candidate)) return candidate;
+  }
+
+  return isCompleteAddress(text) ? text : null;
 }
 
 function parseGuestCount(text: string): number | null {
@@ -1382,8 +1491,14 @@ function extractCartItems(text: string, menuItems: MenuCatalogItem[], aggressive
 
 function buildItemPhrases(item: MenuCatalogItem): string[] {
   const base = normalizeText(item.name);
-  const withoutParens = normalizeText(item.name.replace(/\([^)]*\)/g, " "));
-  const phrases = new Set<string>([base, withoutParens]);
+  const phrases = new Set<string>([base]);
+
+  const portionAtEndMatch = base.match(/^(.*)\b(half|full)\b$/);
+  if (portionAtEndMatch) {
+    const itemName = portionAtEndMatch[1].trim();
+    const portion = portionAtEndMatch[2].trim();
+    if (itemName) phrases.add(`${portion} ${itemName}`);
+  }
 
   if (base.includes("soup")) {
     const withoutSoup = base.replace(/\bsoup\b/g, "").trim();
@@ -1490,7 +1605,13 @@ function handleResolvedAdditions(
   };
 
   const prefix = buildAddedItemsMessage(additions, prefersRomanUrdu, mergedCart);
-  if (!context.state.upsell_offered) {
+  const bundledCheckoutDetails =
+    detectOrderType(normalizeText(context.messageText)) != null ||
+    parseAddress(context.messageText) != null ||
+    parseGuestCount(normalizeText(context.messageText)) != null ||
+    parseReservationTime(normalizeText(context.messageText)) != null;
+
+  if (!context.state.upsell_offered && !bundledCheckoutDetails) {
     const upsell = pickUpsell(mergedCart, context.menuItems);
     if (upsell && !cartAlreadyHasItem(mergedCart, upsell.name)) {
       const question = prefersRomanUrdu
@@ -1653,13 +1774,13 @@ function findAmbiguousMenuMatches(text: string, menuItems: MenuCatalogItem[]): M
   if (tokens.length === 0) return [];
 
   const matches = menuItems.filter((item) => {
-    const itemTokens = getMeaningfulTokens(item.name.replace(/\([^)]*\)/g, " "));
+    const itemTokens = getMeaningfulTokens(item.name);
 
     if (tokens.length === 1) {
       return itemTokens.includes(tokens[0]);
     }
 
-    return itemTokens.every((token) => tokens.includes(token));
+    return tokens.every((token) => itemTokens.includes(token));
   });
 
   return matches.length > 1 ? matches : [];
@@ -1670,7 +1791,7 @@ function findTokenMatchedItems(text: string, menuItems: MenuCatalogItem[]): Menu
   if (requestTokens.length < 2) return [];
 
   return menuItems.filter((item) => {
-    const itemTokens = getMeaningfulTokens(item.name.replace(/\([^)]*\)/g, " "));
+    const itemTokens = getMeaningfulTokens(item.name);
     if (itemTokens.length < 2) return false;
     return itemTokens.every((token) => requestTokens.includes(token));
   });
@@ -1699,7 +1820,7 @@ function findFuzzyMenuMatches(text: string, menuItems: MenuCatalogItem[]): MenuC
 }
 
 function getFuzzyItemScore(requestText: string, item: MenuCatalogItem): number {
-  const itemText = getMeaningfulTokens(item.name.replace(/\([^)]*\)/g, " ")).join(" ");
+  const itemText = getMeaningfulTokens(item.name).join(" ");
   if (!itemText) return 0;
 
   const directSimilarity = getNormalizedSimilarity(requestText, itemText);
