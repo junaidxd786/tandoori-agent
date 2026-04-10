@@ -119,6 +119,8 @@ create table if not exists conversation_states (
   resume_workflow_step text,
   last_presented_category text,
   last_presented_at timestamptz,
+  last_presented_options jsonb,
+  last_presented_options_at timestamptz,
   order_type text,
   address text,
   guests integer,
@@ -148,6 +150,8 @@ alter table conversation_states add column if not exists resume_workflow_step te
 alter table conversation_states add column if not exists last_processed_message_seq bigint;
 alter table conversation_states add column if not exists last_presented_category text;
 alter table conversation_states add column if not exists last_presented_at timestamptz;
+alter table conversation_states add column if not exists last_presented_options jsonb;
+alter table conversation_states add column if not exists last_presented_options_at timestamptz;
 alter table conversation_states add column if not exists declined_upsells jsonb not null default '[]'::jsonb;
 alter table conversation_states drop constraint if exists conversation_states_preferred_language_check;
 alter table conversation_states add constraint conversation_states_preferred_language_check check (preferred_language in ('english', 'roman_urdu')) not valid;

@@ -208,6 +208,8 @@ export interface Database {
           resume_workflow_step: WorkflowStep | null;
           last_presented_category: string | null;
           last_presented_at: string | null;
+          last_presented_options: Json | null;
+          last_presented_options_at: string | null;
           order_type: OrderType | null;
           address: string | null;
           guests: number | null;
@@ -236,6 +238,8 @@ export interface Database {
           resume_workflow_step?: WorkflowStep | null;
           last_presented_category?: string | null;
           last_presented_at?: string | null;
+          last_presented_options?: Json | null;
+          last_presented_options_at?: string | null;
           order_type?: OrderType | null;
           address?: string | null;
           guests?: number | null;

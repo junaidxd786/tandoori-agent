@@ -120,6 +120,8 @@ create table if not exists conversation_states (
   ),
   last_presented_category text,
   last_presented_at timestamptz,
+  last_presented_options jsonb,
+  last_presented_options_at timestamptz,
   order_type text check (order_type in ('delivery', 'dine-in')),
   address text,
   guests integer check (guests is null or guests > 0),

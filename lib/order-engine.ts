@@ -56,6 +56,8 @@ export interface ConversationState {
   resume_workflow_step: WorkflowStep | null;
   last_presented_category: string | null;
   last_presented_at: string | null;
+  last_presented_options: MenuCatalogItem[] | null;
+  last_presented_options_at: string | null;
   order_type: OrderType | null;
   address: string | null;
   guests: number | null;
@@ -420,6 +422,7 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
 };
 const STALE_DRAFT_HOURS = 4;
 const PRESENTED_CATEGORY_TTL_MINUTES = 30;
+const PRESENTED_OPTIONS_TTL_MINUTES = 15;
 const FUZZY_ITEM_AUTO_MATCH_THRESHOLD = 0.83;
 const FUZZY_ITEM_AMBIGUOUS_THRESHOLD = 0.68;
 const FUZZY_ITEM_MIN_MARGIN = 0.06;
@@ -434,6 +437,22 @@ const MENU_DESCRIPTOR_TOKENS = new Set([
   "scoop",
   "scoops",
 ]);
+const OPTION_WORDS: Record<string, number> = {
+  ...NUMBER_WORDS,
+  first: 1,
+  second: 2,
+  third: 3,
+  fourth: 4,
+  fifth: 5,
+  pehla: 1,
+  pehli: 1,
+  dusra: 2,
+  teesra: 3,
+  chautha: 4,
+  "1st": 1,
+  "2nd": 2,
+  "3rd": 3,
+};
 
 export function getDefaultConversationState(conversationId: string): ConversationState {
   return {
@@ -444,6 +463,8 @@ export function getDefaultConversationState(conversationId: string): Conversatio
     resume_workflow_step: null,
     last_presented_category: null,
     last_presented_at: null,
+    last_presented_options: null,
+    last_presented_options_at: null,
     order_type: null,
     address: null,
     guests: null,
@@ -471,6 +492,10 @@ export function parseConversationState(raw: Partial<ConversationState> & { conve
     declined_upsells: Array.isArray(raw.declined_upsells)
       ? raw.declined_upsells.filter((value): value is string => typeof value === "string")
       : [],
+    last_presented_options: Array.isArray(raw.last_presented_options)
+      ? raw.last_presented_options.filter(isMenuCatalogItemLike)
+      : null,
+    last_presented_options_at: typeof raw.last_presented_options_at === "string" ? raw.last_presented_options_at : null,
   };
 }
 
@@ -485,6 +510,35 @@ export function decideTurn(context: TurnContext): TurnDecision {
   const shouldBlockForClosedHours = isOrderFlowAttempt(text, state, menuItems);
   const respond = (reply: string, statePatch: Partial<ConversationState>) =>
     replyDecision(reply, statePatch, preferredLanguage);
+
+  const activePresentedOptions = getActivePresentedOptions(state);
+  if (activePresentedOptions && activePresentedOptions.length > 0) {
+    const selectionNumber = parseSelectionNumber(text);
+    if (selectionNumber != null && selectionNumber >= 1 && selectionNumber <= activePresentedOptions.length) {
+      const selectedItem = activePresentedOptions[selectionNumber - 1];
+      return handleResolvedAdditions(
+        [
+          {
+            name: selectedItem.name,
+            price: selectedItem.price,
+            qty: extractAnyQuantity(text) ?? 1,
+            category: selectedItem.category,
+          },
+        ],
+        {
+          ...context,
+          state: {
+            ...state,
+            preferred_language: preferredLanguage,
+            last_presented_options: null,
+            last_presented_options_at: null,
+          },
+        },
+        preferredLanguage,
+        prefersRomanUrdu,
+      );
+    }
+  }
 
   if (text.length === 0) {
     return respond(
@@ -1146,19 +1200,19 @@ export function decideTurn(context: TurnContext): TurnDecision {
   }
 
   if (ambiguousMatches.length > 1 && (!browseIntent || orderIntent)) {
+    const presentedOptions = ambiguousMatches.slice(0, 6);
+    const numberedOptions = presentedOptions
+      .map((item, index) => `${index + 1}. *${item.name}* - Rs. ${item.price}`)
+      .join("\n");
     const prompt = prefersRomanUrdu
-      ? `Aap *${context.messageText.trim()}* se in mein se konsa item chahte hain?\n${ambiguousMatches
-        .slice(0, 6)
-        .map((item) => `- *${item.name}* - Rs. ${item.price}`)
-        .join("\n")}`
-      : `I found multiple matching items for *${context.messageText.trim()}*.\nWhich one would you like?\n${ambiguousMatches
-          .slice(0, 6)
-          .map((item) => `- *${item.name}* - Rs. ${item.price}`)
-          .join("\n")}`;
+      ? `Aap *${context.messageText.trim()}* se in mein se konsa item chahte hain?\n${numberedOptions}\n\nNumber (1, 2, ...) likh dein ya item ka naam type karein.`
+      : `I found multiple matching items for *${context.messageText.trim()}*.\nWhich one would you like?\n${numberedOptions}\n\nReply with the number or type the name.`;
     return respond(prompt, {
       workflow_step: state.cart.length > 0 ? state.workflow_step : "idle",
       last_presented_category: getSingleCategoryOrNull(ambiguousMatches),
       last_presented_at: new Date().toISOString(),
+      last_presented_options: presentedOptions,
+      last_presented_options_at: new Date().toISOString(),
       upsell_item_name: null,
       upsell_item_price: null,
       upsell_offered: false,
@@ -1229,15 +1283,17 @@ export function decideTurn(context: TurnContext): TurnDecision {
       prefersRomanUrdu
         ? `Mujhe exact item clear nahi hua. In mein se konsa chahiye?\n${likelyMenuSuggestions
             .slice(0, 4)
-            .map((item) => `- *${item.name}* - Rs. ${item.price}`)
-            .join("\n")}`
+            .map((item, index) => `${index + 1}. *${item.name}* - Rs. ${item.price}`)
+            .join("\n")}\n\nNumber likh dein.`
         : `I couldn't identify the exact item yet. Which one did you mean?\n${likelyMenuSuggestions
             .slice(0, 4)
-            .map((item) => `- *${item.name}* - Rs. ${item.price}`)
-            .join("\n")}`,
+            .map((item, index) => `${index + 1}. *${item.name}* - Rs. ${item.price}`)
+            .join("\n")}\n\nReply with the number.`,
       {
         last_presented_category: getSingleCategoryOrNull(likelyMenuSuggestions),
         last_presented_at: new Date().toISOString(),
+        last_presented_options: likelyMenuSuggestions.slice(0, 4),
+        last_presented_options_at: new Date().toISOString(),
         upsell_item_name: null,
         upsell_item_price: null,
         upsell_offered: false,
@@ -1261,14 +1317,16 @@ export function decideTurn(context: TurnContext): TurnDecision {
     return respond(
       prefersRomanUrdu
         ? `Kya aap in mein se kuch kehna chahte hain?\n${lowConfidenceSuggestions
-            .map((item) => `- *${item.name}* - Rs. ${item.price}`)
-            .join("\n")}`
+            .map((item, index) => `${index + 1}. *${item.name}* - Rs. ${item.price}`)
+            .join("\n")}\n\nNumber likh dein.`
         : `Did you mean one of these?\n${lowConfidenceSuggestions
-            .map((item) => `- *${item.name}* - Rs. ${item.price}`)
-            .join("\n")}`,
+            .map((item, index) => `${index + 1}. *${item.name}* - Rs. ${item.price}`)
+            .join("\n")}\n\nReply with the number.`,
       {
         last_presented_category: getSingleCategoryOrNull(lowConfidenceSuggestions),
         last_presented_at: new Date().toISOString(),
+        last_presented_options: lowConfidenceSuggestions,
+        last_presented_options_at: new Date().toISOString(),
       },
     );
   }
@@ -1537,7 +1595,15 @@ function replyDecision(
   statePatch: Partial<ConversationState>,
   preferredLanguage: LanguagePreference,
 ): TurnDecision {
-  return { kind: "reply", reply, statePatch: withPreferredLanguage(statePatch, preferredLanguage) };
+  const effectivePatch: Partial<ConversationState> = { ...statePatch };
+  if (!("last_presented_options" in statePatch)) {
+    effectivePatch.last_presented_options = null;
+  }
+  if (!("last_presented_options_at" in statePatch)) {
+    effectivePatch.last_presented_options_at = null;
+  }
+
+  return { kind: "reply", reply, statePatch: withPreferredLanguage(effectivePatch, preferredLanguage) };
 }
 
 function resetDraftState(): Partial<ConversationState> {
@@ -1546,6 +1612,8 @@ function resetDraftState(): Partial<ConversationState> {
     resume_workflow_step: null,
     last_presented_category: null,
     last_presented_at: null,
+    last_presented_options: null,
+    last_presented_options_at: null,
     cart: [],
     order_type: null,
     address: null,
@@ -1572,6 +1640,43 @@ function normalizeText(value: string): string {
 
 function normalizeCompactText(value: string): string {
   return normalizeText(value).replace(/\s+/g, "");
+}
+
+function parseSelectionNumber(text: string): number | null {
+  const normalized = normalizeText(text);
+  const digitMatch = normalized.match(/\b([1-9][0-9]?)\b/);
+  if (digitMatch) {
+    const parsed = Number.parseInt(digitMatch[1], 10);
+    if (parsed >= 1 && parsed <= 20) return parsed;
+  }
+
+  for (const token of normalized.split(/\s+/)) {
+    const parsed = OPTION_WORDS[token];
+    if (typeof parsed === "number" && parsed >= 1 && parsed <= 20) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function getActivePresentedOptions(state: ConversationState): MenuCatalogItem[] | null {
+  if (!state.last_presented_options || !state.last_presented_options_at) return null;
+  const ageMs = Date.now() - new Date(state.last_presented_options_at).getTime();
+  if (Number.isNaN(ageMs) || ageMs > PRESENTED_OPTIONS_TTL_MINUTES * 60 * 1000) return null;
+  return state.last_presented_options;
+}
+
+function isMenuCatalogItemLike(value: unknown): value is MenuCatalogItem {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Partial<MenuCatalogItem>;
+  return (
+    typeof item.id === "string" &&
+    typeof item.name === "string" &&
+    typeof item.price === "number" &&
+    typeof item.is_available === "boolean" &&
+    (item.category === null || typeof item.category === "string")
+  );
 }
 
 function escapeRegex(value: string): string {
