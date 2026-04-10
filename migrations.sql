@@ -84,6 +84,7 @@ on conflict (branch_id) do nothing;
 
 alter table menu_items add column if not exists branch_id uuid references branches(id) on delete cascade;
 alter table menu_items add column if not exists sort_order integer not null default 0;
+alter table menu_items add column if not exists description text;
 update menu_items set branch_id = branches.id
 from branches
 where menu_items.branch_id is null and branches.slug = 'default-branch';

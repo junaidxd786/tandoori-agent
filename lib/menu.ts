@@ -191,12 +191,51 @@ export async function applyMenuCatalog(branchId: string, items: MenuItem[], repl
     throw new Error(message);
   }
 
-  const { error } = await supabaseAdmin.rpc("apply_menu_catalog", {
-    branch_uuid: branchId,
-    menu_payload: sanitized.items,
-    replace_all: replaceAll,
-  });
-  if (error) throw error;
+  const { data: existingRows, error: existingError } = await supabaseAdmin
+    .from("menu_items")
+    .select("id, name")
+    .eq("branch_id", branchId);
+  if (existingError) throw existingError;
+
+  const existingByName = new Map<string, { id: string; name: string }>();
+  for (const row of existingRows ?? []) {
+    existingByName.set(getMenuNameKey(row.name), row);
+  }
+
+  for (const item of sanitized.items) {
+    const normalizedName = getMenuNameKey(item.name);
+    const existing = existingByName.get(normalizedName);
+    const payload = {
+      name: item.name,
+      price: item.price,
+      category: item.category,
+      is_available: item.is_available,
+    };
+
+    if (existing) {
+      const { error: updateError } = await supabaseAdmin.from("menu_items").update(payload).eq("id", existing.id);
+      if (updateError) throw updateError;
+      continue;
+    }
+
+    const { error: insertError } = await supabaseAdmin.from("menu_items").insert({
+      branch_id: branchId,
+      ...payload,
+    });
+    if (insertError) throw insertError;
+  }
+
+  if (replaceAll) {
+    const incomingNames = new Set(sanitized.items.map((item) => getMenuNameKey(item.name)));
+    const idsToDelete = (existingRows ?? [])
+      .filter((row) => !incomingNames.has(getMenuNameKey(row.name)))
+      .map((row) => row.id);
+
+    if (idsToDelete.length > 0) {
+      const { error: deleteError } = await supabaseAdmin.from("menu_items").delete().in("id", idsToDelete);
+      if (deleteError) throw deleteError;
+    }
+  }
 
   invalidateMenuCache(branchId);
 }

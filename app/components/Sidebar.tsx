@@ -152,20 +152,30 @@ export function Sidebar() {
           <span className="mb-2 block text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">
             Active Branch
           </span>
-          <select
-            value={selectedBranchId}
-            onChange={(event) => setSelectedBranchId(event.target.value as string | "all")}
-            className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-100 outline-none focus:border-brand"
-          >
-            {session.role === "admin" ? <option value="all">All branches</option> : null}
-            {session.allowedBranches.map((branch) => (
-              <option key={branch.id} value={branch.id}>
-                {branch.name}
-              </option>
-            ))}
-          </select>
+          {session.role === "admin" ? (
+            <select
+              value={selectedBranchId}
+              onChange={(event) => setSelectedBranchId(event.target.value as string | "all")}
+              className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-100 outline-none focus:border-brand"
+            >
+              <option value="all">All branches</option>
+              {session.allowedBranches.map((branch) => (
+                <option key={branch.id} value={branch.id}>
+                  {branch.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm font-semibold text-zinc-100">
+              {selectedBranch?.name || session.allowedBranches[0]?.name || "Assigned branch"}
+            </div>
+          )}
           <p className="mt-2 text-xs text-zinc-500">
-            {selectedBranch ? selectedBranch.address : "Admin overview across all branches"}
+            {selectedBranch
+              ? selectedBranch.address
+              : session.role === "admin"
+                ? "Admin overview across all branches"
+                : "Branch is assigned by admin"}
           </p>
         </label>
       </div>
@@ -219,11 +229,11 @@ export function Sidebar() {
       <div className="border-t border-zinc-800/70 p-4">
         <div className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-800 text-zinc-300">
-              <ShieldCheck size={18} />
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-800 text-zinc-300">
+              <ShieldCheck size={16} />
             </div>
             <div className="min-w-0">
-              <p className="truncate text-sm font-semibold text-white">
+              <p className="text-sm font-semibold leading-tight text-white break-words">
                 {session.fullName || session.email || "Staff User"}
               </p>
               <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">

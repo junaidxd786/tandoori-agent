@@ -31,10 +31,10 @@ type StaffSummary = {
   allowed_branch_ids: string[];
 };
 
-type BranchDraft = { name: string; slug: string; address: string };
+type BranchDraft = { name: string; slug: string; address: string; is_active: "active" | "inactive" };
 type StaffDraft = { full_name: string; email: string; password: string; role: "admin" | "branch_staff"; branch_id: string };
 
-const EMPTY_BRANCH: BranchDraft = { name: "", slug: "", address: "" };
+const EMPTY_BRANCH: BranchDraft = { name: "", slug: "", address: "", is_active: "active" };
 const EMPTY_STAFF: StaffDraft = { full_name: "", email: "", password: "", role: "branch_staff", branch_id: "" };
 
 async function readJson<T>(response: Response) {
@@ -139,6 +139,17 @@ export default function AdminConsole() {
             <div className="mt-3 grid gap-3 md:grid-cols-3">
               <input value={branchDraft.name} onChange={(e) => setBranchDraft((c) => ({ ...c, name: e.target.value }))} placeholder="Branch name" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
               <input value={branchDraft.slug} onChange={(e) => setBranchDraft((c) => ({ ...c, slug: e.target.value }))} placeholder="Slug (optional)" className="rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+              <select
+                value={branchDraft.is_active}
+                onChange={(e) => setBranchDraft((c) => ({ ...c, is_active: e.target.value as "active" | "inactive" }))}
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm"
+              >
+                <option value="active">Active</option>
+                <option value="inactive">Inactive</option>
+              </select>
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
+              <textarea value={branchDraft.address} onChange={(e) => setBranchDraft((c) => ({ ...c, address: e.target.value }))} placeholder="Branch address" className="min-h-20 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
               <button
                 onClick={async () => {
                   setCreatingBranch(true);
@@ -147,7 +158,11 @@ export default function AdminConsole() {
                       await fetch("/api/admin/branches", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ ...branchDraft, is_active: true, slug: branchDraft.slug || null }),
+                        body: JSON.stringify({
+                          ...branchDraft,
+                          is_active: branchDraft.is_active === "active",
+                          slug: branchDraft.slug || null,
+                        }),
                       }),
                     );
                     setBranchDraft(EMPTY_BRANCH);
@@ -165,7 +180,6 @@ export default function AdminConsole() {
                 {creatingBranch ? <Loader2 size={16} className="mx-auto animate-spin" /> : "Create Branch"}
               </button>
             </div>
-            <textarea value={branchDraft.address} onChange={(e) => setBranchDraft((c) => ({ ...c, address: e.target.value }))} placeholder="Branch address" className="mt-3 min-h-20 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-white p-5">
@@ -180,7 +194,14 @@ export default function AdminConsole() {
                     <input value={branch.name} onChange={(e) => setBranches((c) => c.map((b) => b.id === branch.id ? { ...b, name: e.target.value } : b))} className="rounded-lg border border-slate-200 px-3 py-2 text-sm" />
                     <input value={branch.slug} onChange={(e) => setBranches((c) => c.map((b) => b.id === branch.id ? { ...b, slug: e.target.value } : b))} className="rounded-lg border border-slate-200 px-3 py-2 text-sm" />
                     <input value={branch.address} onChange={(e) => setBranches((c) => c.map((b) => b.id === branch.id ? { ...b, address: e.target.value } : b))} className="rounded-lg border border-slate-200 px-3 py-2 text-sm" />
-                    <label className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm"><input type="checkbox" checked={branch.is_active} onChange={(e) => setBranches((c) => c.map((b) => b.id === branch.id ? { ...b, is_active: e.target.checked } : b))} />Active</label>
+                    <select
+                      value={branch.is_active ? "active" : "inactive"}
+                      onChange={(e) => setBranches((c) => c.map((b) => b.id === branch.id ? { ...b, is_active: e.target.value === "active" } : b))}
+                      className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    >
+                      <option value="active">Active</option>
+                      <option value="inactive">Inactive</option>
+                    </select>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <Badge text={`${branch.stats.conversations} chats`} />

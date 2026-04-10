@@ -19,6 +19,14 @@ type SettingsState = {
   ai_personality: string;
 };
 
+const CITY_OPTIONS = ["Wah Cantt", "Rawalpindi", "Islamabad", "Lahore", "Karachi", "Peshawar"] as const;
+const AI_PERSONALITY_PRESETS = [
+  "Warm & Professional",
+  "Friendly & Casual",
+  "Fast & Direct",
+  "Premium & Polished",
+] as const;
+
 function toTimeInputValue(value: string): string {
   const normalized = value.trim();
   const twelveHour = normalized.match(/^(\d{1,2}):(\d{2})\s*([AaPp][Mm])$/);
@@ -55,6 +63,14 @@ export default function SettingsPage() {
     phone_dine_in: "",
     ai_personality: "",
   });
+  const selectedCityOption = CITY_OPTIONS.includes(settings.city as (typeof CITY_OPTIONS)[number])
+    ? settings.city
+    : "__custom__";
+  const selectedPersonalityOption = AI_PERSONALITY_PRESETS.includes(
+    settings.ai_personality as (typeof AI_PERSONALITY_PRESETS)[number],
+  )
+    ? settings.ai_personality
+    : "__custom__";
 
   useEffect(() => {
     let cancelled = false;
@@ -249,13 +265,34 @@ export default function SettingsPage() {
 
         <Card icon={<Phone size={16} />} title="Contact & City">
           <SettingRow label="City">
-            <input
-              type="text"
-              value={settings.city}
-              onChange={(event) => setSettings((current) => ({ ...current, city: event.target.value }))}
+            <select
+              value={selectedCityOption}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  city: event.target.value === "__custom__" ? current.city : event.target.value,
+                }))
+              }
               className="w-40 text-right text-sm font-semibold text-slate-800 bg-transparent outline-none"
-            />
+            >
+              {CITY_OPTIONS.map((city) => (
+                <option key={city} value={city}>
+                  {city}
+                </option>
+              ))}
+              <option value="__custom__">Custom</option>
+            </select>
           </SettingRow>
+          {selectedCityOption === "__custom__" ? (
+            <SettingRow label="Custom City">
+              <input
+                type="text"
+                value={settings.city}
+                onChange={(event) => setSettings((current) => ({ ...current, city: event.target.value }))}
+                className="w-40 text-right text-sm font-semibold text-slate-800 bg-transparent outline-none"
+              />
+            </SettingRow>
+          ) : null}
           <SettingRow label="Delivery Phone">
             <input
               type="text"
@@ -277,13 +314,35 @@ export default function SettingsPage() {
         <Card icon={<Bot size={16} />} title="AI Tone">
           <div className="py-2.5">
             <span className="text-sm text-slate-600 font-medium">AI Personality</span>
-            <textarea
-              value={settings.ai_personality}
-              onChange={(event) => setSettings((current) => ({ ...current, ai_personality: event.target.value }))}
-              rows={4}
+            <select
+              value={selectedPersonalityOption}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  ai_personality:
+                    event.target.value === "__custom__" ? current.ai_personality : event.target.value,
+                }))
+              }
               className="mt-3 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-800 outline-none focus:border-brand/30 focus:ring-2 focus:ring-brand/10"
-              placeholder="Warm & Professional"
-            />
+            >
+              {AI_PERSONALITY_PRESETS.map((preset) => (
+                <option key={preset} value={preset}>
+                  {preset}
+                </option>
+              ))}
+              <option value="__custom__">Custom</option>
+            </select>
+            {selectedPersonalityOption === "__custom__" ? (
+              <textarea
+                value={settings.ai_personality}
+                onChange={(event) =>
+                  setSettings((current) => ({ ...current, ai_personality: event.target.value }))
+                }
+                rows={4}
+                className="mt-3 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-800 outline-none focus:border-brand/30 focus:ring-2 focus:ring-brand/10"
+                placeholder="Describe custom tone"
+              />
+            ) : null}
             <p className="mt-2 text-xs text-slate-400">
               This tone is injected into the WhatsApp assistant prompt for the selected branch.
             </p>
