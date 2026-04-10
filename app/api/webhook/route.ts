@@ -14,6 +14,7 @@ import {
   getDefaultConversationState,
   inferLanguagePreference,
   parseConversationState,
+  type TurnDecision,
   type ConversationState,
   type PlaceableOrderPayload,
   type RecentOrderContext,
@@ -434,7 +435,7 @@ async function drainConversationQueue(conversation: ConversationRow) {
       }
 
       const recentOrder = await getRecentOrderContext(conversation.id);
-      const decision = decideTurn({
+      const decision = await decideTurn({
         messageText: nextMessage.content,
         state,
         menuItems,
@@ -486,6 +487,18 @@ async function drainConversationQueue(conversation: ConversationRow) {
           last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
           last_error: null,
         });
+        await recordOrderAgentTurn({
+          conversationId: conversation.id,
+          messageId: nextMessage.id,
+          whatsappMessageId: nextMessage.whatsapp_msg_id,
+          workflowBefore: state.workflow_step,
+          workflowAfter:
+            (updatedState.workflow_step as ConversationState["workflow_step"] | undefined) ?? state.workflow_step,
+          decisionKind: decision.kind,
+          trace: decision.trace,
+          result: "success",
+          reply,
+        });
       } catch (error) {
         if (error instanceof OutboundMessageError) {
           if (error.messageSent) {
@@ -497,11 +510,36 @@ async function drainConversationQueue(conversation: ConversationRow) {
               last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
               last_error: error.message,
             });
+            await recordOrderAgentTurn({
+              conversationId: conversation.id,
+              messageId: nextMessage.id,
+              whatsappMessageId: nextMessage.whatsapp_msg_id,
+              workflowBefore: state.workflow_step,
+              workflowAfter:
+                (updatedState.workflow_step as ConversationState["workflow_step"] | undefined) ?? state.workflow_step,
+              decisionKind: decision.kind,
+              trace: decision.trace,
+              result: "partial",
+              reply: null,
+              error: error.message,
+            });
             continue;
           }
 
           await updateConversationState(state, {
             last_error: error.message,
+          });
+          await recordOrderAgentTurn({
+            conversationId: conversation.id,
+            messageId: nextMessage.id,
+            whatsappMessageId: nextMessage.whatsapp_msg_id,
+            workflowBefore: state.workflow_step,
+            workflowAfter: state.workflow_step,
+            decisionKind: decision.kind,
+            trace: decision.trace,
+            result: "failed",
+            reply: null,
+            error: error.message,
           });
           throw error;
         }
@@ -521,6 +559,18 @@ async function drainConversationQueue(conversation: ConversationRow) {
             last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
             last_error: error instanceof Error ? error.message : "Unknown processing error",
           });
+          await recordOrderAgentTurn({
+            conversationId: conversation.id,
+            messageId: nextMessage.id,
+            whatsappMessageId: nextMessage.whatsapp_msg_id,
+            workflowBefore: state.workflow_step,
+            workflowAfter: state.workflow_step,
+            decisionKind: decision.kind,
+            trace: decision.trace,
+            result: "recovered",
+            reply: fallback,
+            error: error instanceof Error ? error.message : "Unknown processing error",
+          });
         } catch (fallbackError) {
           if (fallbackError instanceof OutboundMessageError && fallbackError.messageSent) {
             await updateConversationState(state, {
@@ -530,6 +580,18 @@ async function drainConversationQueue(conversation: ConversationRow) {
               last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
               last_error: fallbackError.message,
             });
+            await recordOrderAgentTurn({
+              conversationId: conversation.id,
+              messageId: nextMessage.id,
+              whatsappMessageId: nextMessage.whatsapp_msg_id,
+              workflowBefore: state.workflow_step,
+              workflowAfter: state.workflow_step,
+              decisionKind: decision.kind,
+              trace: decision.trace,
+              result: "partial",
+              reply: null,
+              error: fallbackError.message,
+            });
             continue;
           }
 
@@ -538,6 +600,21 @@ async function drainConversationQueue(conversation: ConversationRow) {
               error instanceof Error
                 ? `${error.message} | Fallback failed: ${fallbackError instanceof Error ? fallbackError.message : "Unknown error"}`
                 : "Unknown processing error",
+          });
+          await recordOrderAgentTurn({
+            conversationId: conversation.id,
+            messageId: nextMessage.id,
+            whatsappMessageId: nextMessage.whatsapp_msg_id,
+            workflowBefore: state.workflow_step,
+            workflowAfter: state.workflow_step,
+            decisionKind: decision.kind,
+            trace: decision.trace,
+            result: "failed",
+            reply: null,
+            error:
+              fallbackError instanceof Error
+                ? fallbackError.message
+                : "Fallback failed with unknown error",
           });
           throw fallbackError;
         }
@@ -858,4 +935,37 @@ function isValidWhatsAppSignature(rawBody: string, signatureHeader: string | nul
 
 async function sleep(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function recordOrderAgentTurn(input: {
+  conversationId: string;
+  messageId: string;
+  whatsappMessageId: string | null;
+  workflowBefore: ConversationState["workflow_step"];
+  workflowAfter: ConversationState["workflow_step"];
+  decisionKind: TurnDecision["kind"];
+  trace?: TurnDecision["trace"];
+  result: "success" | "partial" | "recovered" | "failed";
+  reply: string | null;
+  error?: string;
+}) {
+  try {
+    await supabaseAdmin.from("order_agent_turns").insert({
+      conversation_id: input.conversationId,
+      message_id: input.messageId,
+      whatsapp_message_id: input.whatsappMessageId,
+      workflow_before: input.workflowBefore,
+      workflow_after: input.workflowAfter,
+      decision_kind: input.decisionKind,
+      nlu_intent: input.trace?.intent ?? null,
+      nlu_confidence: input.trace?.confidence ?? null,
+      nlu_unknown_items: input.trace?.unknownItems ?? [],
+      nlu_notes: input.trace?.notes ?? null,
+      processing_result: input.result,
+      assistant_reply: input.reply,
+      error_message: input.error ?? null,
+    });
+  } catch (error) {
+    console.error("[webhook] Failed to record order agent turn:", error);
+  }
 }

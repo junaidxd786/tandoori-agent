@@ -142,6 +142,24 @@ create table if not exists conversation_states (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists order_agent_turns (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  message_id uuid references messages(id) on delete set null,
+  whatsapp_message_id text,
+  workflow_before text not null,
+  workflow_after text not null,
+  decision_kind text not null check (decision_kind in ('reply', 'place_order', 'fallback')),
+  nlu_intent text,
+  nlu_confidence numeric,
+  nlu_unknown_items jsonb not null default '[]'::jsonb,
+  nlu_notes text,
+  processing_result text not null default 'success' check (processing_result in ('success', 'partial', 'recovered', 'failed')),
+  assistant_reply text,
+  error_message text,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists orders (
   id uuid primary key default gen_random_uuid(),
   branch_id uuid not null references branches(id) on delete cascade,
@@ -204,6 +222,8 @@ create index if not exists idx_messages_whatsapp_msg_id on messages(whatsapp_msg
 create index if not exists idx_orders_branch_created on orders(branch_id, created_at desc);
 create index if not exists idx_orders_status on orders(status);
 create index if not exists idx_conversation_states_conversation on conversation_states(conversation_id);
+create index if not exists idx_order_agent_turns_conversation_created on order_agent_turns(conversation_id, created_at desc);
+create index if not exists idx_order_agent_turns_message on order_agent_turns(message_id);
 create index if not exists idx_menu_items_branch_name_lookup on menu_items(branch_id, lower(trim(name)));
 create index if not exists idx_menu_uploads_branch_created on menu_uploads(branch_id, created_at desc);
 create index if not exists idx_staff_profiles_default_branch on staff_profiles(default_branch_id);
@@ -216,6 +236,7 @@ alter table restaurant_settings enable row level security;
 alter table menu_items enable row level security;
 alter table menu_uploads enable row level security;
 alter table conversation_states enable row level security;
+alter table order_agent_turns enable row level security;
 alter table orders enable row level security;
 alter table order_items enable row level security;
 alter table staff_profiles enable row level security;
@@ -237,6 +258,8 @@ drop policy if exists "service_menu_uploads" on menu_uploads;
 create policy "service_menu_uploads" on menu_uploads for all using (true);
 drop policy if exists "service_conversation_states" on conversation_states;
 create policy "service_conversation_states" on conversation_states for all using (true);
+drop policy if exists "service_order_agent_turns" on order_agent_turns;
+create policy "service_order_agent_turns" on order_agent_turns for all using (true);
 drop policy if exists "service_orders" on orders;
 create policy "service_orders" on orders for all using (true);
 drop policy if exists "service_order_items" on order_items;
@@ -283,6 +306,9 @@ begin
   end if;
   if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'conversation_states') then
     alter publication supabase_realtime add table conversation_states;
+  end if;
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'order_agent_turns') then
+    alter publication supabase_realtime add table order_agent_turns;
   end if;
   if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'messages') then
     alter publication supabase_realtime add table messages;

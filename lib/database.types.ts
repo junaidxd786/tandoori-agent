@@ -261,6 +261,43 @@ export interface Database {
         };
         Update: Partial<Database["public"]["Tables"]["conversation_states"]["Insert"]>;
       };
+      order_agent_turns: {
+        Row: {
+          id: string;
+          conversation_id: string;
+          message_id: string | null;
+          whatsapp_message_id: string | null;
+          workflow_before: WorkflowStep;
+          workflow_after: WorkflowStep;
+          decision_kind: "reply" | "place_order" | "fallback";
+          nlu_intent: string | null;
+          nlu_confidence: number | null;
+          nlu_unknown_items: Json;
+          nlu_notes: string | null;
+          processing_result: "success" | "partial" | "recovered" | "failed";
+          assistant_reply: string | null;
+          error_message: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          conversation_id: string;
+          message_id?: string | null;
+          whatsapp_message_id?: string | null;
+          workflow_before: WorkflowStep;
+          workflow_after: WorkflowStep;
+          decision_kind: "reply" | "place_order" | "fallback";
+          nlu_intent?: string | null;
+          nlu_confidence?: number | null;
+          nlu_unknown_items?: Json;
+          nlu_notes?: string | null;
+          processing_result?: "success" | "partial" | "recovered" | "failed";
+          assistant_reply?: string | null;
+          error_message?: string | null;
+          created_at?: string;
+        };
+        Update: Partial<Database["public"]["Tables"]["order_agent_turns"]["Insert"]>;
+      };
       orders: {
         Row: {
           id: string;

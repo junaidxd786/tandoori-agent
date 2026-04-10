@@ -1,12 +1,95 @@
 import OpenAI from "openai";
 import type { BranchSummary } from "./branches";
-import type { LanguagePreference } from "./order-engine";
+import type { LanguagePreference, MenuCatalogItem, OrderType, WorkflowStep } from "./order-engine";
 import type { RestaurantSettings } from "./settings";
 
 const client = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY || "dummy_key_to_prevent_build_crash",
 });
+
+export type OrderTurnIntent =
+  | "greeting"
+  | "add_items"
+  | "remove_items"
+  | "set_order_type"
+  | "provide_address"
+  | "provide_dine_in_details"
+  | "confirm_order"
+  | "modify_order"
+  | "browse_menu"
+  | "category_question"
+  | "payment_question"
+  | "eta_question"
+  | "order_status_question"
+  | "cancel_order"
+  | "restart_order"
+  | "continue_order"
+  | "chitchat"
+  | "unknown";
+
+export interface ParsedTurnItem {
+  name: string;
+  qty: number;
+}
+
+export interface ParsedTurnRemoval {
+  name: string;
+  qty: number | "all";
+}
+
+export interface OrderTurnInterpretation {
+  intent: OrderTurnIntent;
+  confidence: number;
+  language: LanguagePreference;
+  add_items: ParsedTurnItem[];
+  remove_items: ParsedTurnRemoval[];
+  unknown_items: string[];
+  order_type: OrderType | null;
+  address: string | null;
+  guests: number | null;
+  reservation_time: string | null;
+  category_query: string | null;
+  asks_menu: boolean;
+  asks_payment: boolean;
+  asks_eta: boolean;
+  asks_status: boolean;
+  wants_confirmation: boolean | null;
+  wants_restart: boolean;
+  wants_continue: boolean;
+  notes: string | null;
+}
+
+export interface OrderTurnInterpretationInput {
+  messageText: string;
+  workflowStep: WorkflowStep;
+  preferredLanguage: LanguagePreference;
+  cart: Array<{ name: string; qty: number }>;
+  menuItems: MenuCatalogItem[];
+  isOpenNow: boolean;
+}
+
+const DEFAULT_INTERPRETATION: OrderTurnInterpretation = {
+  intent: "unknown",
+  confidence: 0,
+  language: "english",
+  add_items: [],
+  remove_items: [],
+  unknown_items: [],
+  order_type: null,
+  address: null,
+  guests: null,
+  reservation_time: null,
+  category_query: null,
+  asks_menu: false,
+  asks_payment: false,
+  asks_eta: false,
+  asks_status: false,
+  wants_confirmation: null,
+  wants_restart: false,
+  wants_continue: false,
+  notes: null,
+};
 
 function buildSupportPrompt(
   branch: BranchSummary,
@@ -32,7 +115,8 @@ function buildSupportPrompt(
     `Hours: ${settings.opening_time} to ${settings.closing_time}.`,
     `Branch address: ${branch.address}.`,
     `Support phone: ${phone}.`,
-    "Keep replies short, warm, and plain-text WhatsApp friendly.",
+    "You are a support fallback only. The backend owns checkout state and order placement.",
+    "Keep replies short, warm, and plain-text WhatsApp friendly (1-4 lines).",
     languageInstruction,
     "You may help with menu questions, item descriptions, restaurant info, delivery ETA, and payment questions.",
     "When LIVE MENU is provided, treat it as the single source of truth for item availability and prices.",
@@ -50,6 +134,237 @@ function buildSupportPrompt(
       ? "Do not greet again unless the customer greets first."
       : "If the message is only a greeting, greet briefly and ask how you can help.",
   ].join("\n");
+}
+
+function buildOrderInterpreterPrompt(input: OrderTurnInterpretationInput): string {
+  const menuLines = input.menuItems
+    .filter((item) => item.is_available)
+    .slice(0, 250)
+    .map((item) => `${item.name} | ${item.category ?? "General"} | ${item.price}`)
+    .join("\n");
+  const cartLines = input.cart.length > 0 ? input.cart.map((item) => `${item.name} x${item.qty}`).join(", ") : "empty";
+
+  return [
+    "You are an order intent parser for a WhatsApp restaurant assistant.",
+    "Return strict JSON only. Never return markdown or prose.",
+    "You must not hallucinate menu item names. Use only menu names from MENU_CATALOG for add_items/remove_items.",
+    "If customer asks for an item not confidently in menu, put it in unknown_items and keep add_items empty for that item.",
+    "Do not infer delivery address unless the message clearly includes one.",
+    "Do not set guests/reservation_time unless clearly provided.",
+    "intent must be one of:",
+    "greeting,add_items,remove_items,set_order_type,provide_address,provide_dine_in_details,confirm_order,modify_order,browse_menu,category_question,payment_question,eta_question,order_status_question,cancel_order,restart_order,continue_order,chitchat,unknown",
+    "Schema:",
+    "{",
+    '  "intent": "unknown",',
+    '  "confidence": 0.0,',
+    '  "language": "english|roman_urdu",',
+    '  "add_items": [{"name":"", "qty":1}],',
+    '  "remove_items": [{"name":"", "qty":1|"all"}],',
+    '  "unknown_items": [""],',
+    '  "order_type": "delivery|dine-in|null",',
+    '  "address": "string|null",',
+    '  "guests": 1,',
+    '  "reservation_time": "string|null",',
+    '  "category_query": "string|null",',
+    '  "asks_menu": true,',
+    '  "asks_payment": true,',
+    '  "asks_eta": true,',
+    '  "asks_status": true,',
+    '  "wants_confirmation": true|false|null,',
+    '  "wants_restart": true|false,',
+    '  "wants_continue": true|false,',
+    '  "notes": "brief reasoning" ',
+    "}",
+    `CONTEXT_WORKFLOW_STEP: ${input.workflowStep}`,
+    `CONTEXT_LANGUAGE: ${input.preferredLanguage}`,
+    `CONTEXT_CART: ${cartLines}`,
+    `CONTEXT_OPEN_NOW: ${input.isOpenNow ? "true" : "false"}`,
+    "MENU_CATALOG:",
+    menuLines || "(no items)",
+  ].join("\n");
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function clampConfidence(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  if (numeric < 0) return 0;
+  if (numeric > 1) return 1;
+  return numeric;
+}
+
+function normalizeLanguage(value: unknown, fallback: LanguagePreference): LanguagePreference {
+  if (value === "roman_urdu") return "roman_urdu";
+  if (value === "english") return "english";
+  return fallback;
+}
+
+function normalizeIntent(value: unknown): OrderTurnIntent {
+  const allowed: OrderTurnIntent[] = [
+    "greeting",
+    "add_items",
+    "remove_items",
+    "set_order_type",
+    "provide_address",
+    "provide_dine_in_details",
+    "confirm_order",
+    "modify_order",
+    "browse_menu",
+    "category_question",
+    "payment_question",
+    "eta_question",
+    "order_status_question",
+    "cancel_order",
+    "restart_order",
+    "continue_order",
+    "chitchat",
+    "unknown",
+  ];
+  return allowed.includes(value as OrderTurnIntent) ? (value as OrderTurnIntent) : "unknown";
+}
+
+function normalizeItems(value: unknown): ParsedTurnItem[] {
+  if (!Array.isArray(value)) return [];
+  const items: ParsedTurnItem[] = [];
+
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const name = String((entry as Record<string, unknown>).name ?? "").trim();
+    const qtyValue = Number((entry as Record<string, unknown>).qty ?? 1);
+    const qty = Number.isFinite(qtyValue) && qtyValue > 0 ? Math.min(Math.floor(qtyValue), 50) : 1;
+    if (!name) continue;
+    items.push({ name, qty });
+  }
+
+  return items;
+}
+
+function normalizeRemovals(value: unknown): ParsedTurnRemoval[] {
+  if (!Array.isArray(value)) return [];
+  const removals: ParsedTurnRemoval[] = [];
+
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const name = String((entry as Record<string, unknown>).name ?? "").trim();
+    const rawQty = (entry as Record<string, unknown>).qty;
+    const qty =
+      rawQty === "all"
+        ? "all"
+        : Number.isFinite(Number(rawQty)) && Number(rawQty) > 0
+          ? Math.min(Math.floor(Number(rawQty)), 50)
+          : 1;
+    if (!name) continue;
+    removals.push({ name, qty });
+  }
+
+  return removals;
+}
+
+function normalizeUnknownItems(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => String(entry ?? "").trim())
+    .filter((entry) => entry.length > 0)
+    .slice(0, 5);
+}
+
+function normalizeOrderType(value: unknown): OrderType | null {
+  if (value === "delivery" || value === "dine-in") return value;
+  return null;
+}
+
+function normalizeOptionalString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeOptionalNumber(value: unknown): number | null {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return Math.min(Math.floor(numeric), 50);
+}
+
+function normalizeBoolean(value: unknown): boolean {
+  return value === true;
+}
+
+function normalizeBooleanOrNull(value: unknown): boolean | null {
+  if (value === true) return true;
+  if (value === false) return false;
+  return null;
+}
+
+function toInterpretation(raw: Record<string, unknown>, fallbackLanguage: LanguagePreference): OrderTurnInterpretation {
+  return {
+    intent: normalizeIntent(raw.intent),
+    confidence: clampConfidence(raw.confidence),
+    language: normalizeLanguage(raw.language, fallbackLanguage),
+    add_items: normalizeItems(raw.add_items),
+    remove_items: normalizeRemovals(raw.remove_items),
+    unknown_items: normalizeUnknownItems(raw.unknown_items),
+    order_type: normalizeOrderType(raw.order_type),
+    address: normalizeOptionalString(raw.address),
+    guests: normalizeOptionalNumber(raw.guests),
+    reservation_time: normalizeOptionalString(raw.reservation_time),
+    category_query: normalizeOptionalString(raw.category_query),
+    asks_menu: normalizeBoolean(raw.asks_menu),
+    asks_payment: normalizeBoolean(raw.asks_payment),
+    asks_eta: normalizeBoolean(raw.asks_eta),
+    asks_status: normalizeBoolean(raw.asks_status),
+    wants_confirmation: normalizeBooleanOrNull(raw.wants_confirmation),
+    wants_restart: normalizeBoolean(raw.wants_restart),
+    wants_continue: normalizeBoolean(raw.wants_continue),
+    notes: normalizeOptionalString(raw.notes),
+  };
+}
+
+export async function getOrderTurnInterpretation(
+  input: OrderTurnInterpretationInput,
+): Promise<OrderTurnInterpretation> {
+  try {
+    const completion = await client.chat.completions.create({
+      model: process.env.ORDER_AGENT_NLU_MODEL || "openrouter/auto",
+      temperature: 0.1,
+      max_tokens: 700,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: buildOrderInterpreterPrompt(input),
+        },
+        {
+          role: "user",
+          content: input.messageText,
+        },
+      ],
+    });
+
+    const rawContent = completion.choices[0]?.message?.content ?? "{}";
+    const parsed = parseJsonObject(rawContent);
+    if (!parsed) {
+      return {
+        ...DEFAULT_INTERPRETATION,
+        language: input.preferredLanguage,
+      };
+    }
+
+    return toInterpretation(parsed, input.preferredLanguage);
+  } catch (error) {
+    console.error("[ai] NLU parser failed:", error);
+    return {
+      ...DEFAULT_INTERPRETATION,
+      language: input.preferredLanguage,
+    };
+  }
 }
 
 export async function getCustomerSupportReply(
