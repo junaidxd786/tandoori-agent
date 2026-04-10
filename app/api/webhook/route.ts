@@ -71,6 +71,10 @@ type MessageRow = {
   whatsapp_msg_id: string | null;
 };
 
+type PersistedUserMessage = {
+  message: MessageRow | null;
+};
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const mode = searchParams.get("hub.mode");
@@ -142,6 +146,10 @@ async function processWebhook(body: unknown) {
       await setActiveBranch(contact.id, selectedBranch.id);
       const selectedConversation = await upsertConversation(contact, selectedBranch.id, contactName);
       const selectedState = await getOrCreateConversationState(selectedConversation.id);
+      if (selectedState.last_processed_user_message_id === message.id) {
+        continue;
+      }
+
       const createdAt = toIsoTimestamp(message.timestamp);
       const persistedMessage = await persistUserMessage(
         selectedConversation.id,
@@ -157,12 +165,15 @@ async function processWebhook(body: unknown) {
           ? `Theek hai, *${selectedBranch.name}* select ho gayi. Address: ${selectedBranch.address}\n\nAb apna order bhej dein.`
           : `Great, you've selected *${selectedBranch.name}*. Address: ${selectedBranch.address}\n\nSend your order whenever you're ready.`,
       );
-      await markMessageProcessed(selectedState, message.id, createdAt, persistedMessage?.ingest_seq ?? null);
+      await markMessageProcessed(selectedState, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
       continue;
     }
 
     const conversation = await upsertConversation(contact, activeBranch.id, contactName);
     const state = await getOrCreateConversationState(conversation.id);
+    if (state.last_processed_user_message_id === message.id) {
+      continue;
+    }
 
     if (message.type !== "text") {
       if (message.type !== "reaction") {
@@ -194,12 +205,12 @@ async function processWebhook(body: unknown) {
         message.from,
         getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
       );
-      await markMessageProcessed(state, message.id, createdAt, persistedMessage?.ingest_seq ?? null);
+      await markMessageProcessed(state, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
       continue;
     }
 
     if (conversation.mode === "human") {
-      await markMessageProcessed(state, message.id, createdAt, persistedMessage?.ingest_seq ?? null);
+      await markMessageProcessed(state, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
       continue;
     }
 
@@ -219,6 +230,10 @@ function extractIncomingMessages(body: unknown): IncomingMessageEvent[] {
     for (const change of entry.changes ?? []) {
       const contactName = change.value?.contacts?.[0]?.profile?.name;
       for (const message of change.value?.messages ?? []) {
+        if (!message.id || !message.from || !message.timestamp || !message.type) {
+          continue;
+        }
+
         events.push({
           message,
           contactName: contactName ?? message.from,
@@ -226,6 +241,12 @@ function extractIncomingMessages(body: unknown): IncomingMessageEvent[] {
       }
     }
   }
+
+  events.sort((left, right) => {
+    const timeDelta = compareMessageTimestamps(left.message.timestamp, right.message.timestamp);
+    if (timeDelta !== 0) return timeDelta;
+    return left.message.id.localeCompare(right.message.id);
+  });
 
   return events;
 }
@@ -322,7 +343,7 @@ async function persistUserMessage(
   content: string,
   whatsappMessageId: string,
   createdAt: string,
-) {
+): Promise<PersistedUserMessage> {
   const { data, error } = await supabaseAdmin
     .from("messages")
     .insert({
@@ -337,15 +358,17 @@ async function persistUserMessage(
     .maybeSingle();
 
   if (!error) {
-    return data
-      ? {
-          id: data.id,
-          ingest_seq: data.ingest_seq,
-          content: data.content,
-          created_at: data.created_at,
-          whatsapp_msg_id: data.whatsapp_msg_id,
-        }
-      : null;
+    return {
+      message: data
+        ? {
+            id: data.id,
+            ingest_seq: data.ingest_seq,
+            content: data.content,
+            created_at: data.created_at,
+            whatsapp_msg_id: data.whatsapp_msg_id,
+          }
+        : null,
+    };
   }
 
   if (String(error.code) !== "23505") {
@@ -363,21 +386,24 @@ async function persistUserMessage(
     throw existingError;
   }
 
-  return existing
-    ? {
-        id: existing.id,
-        ingest_seq: existing.ingest_seq,
-        content: existing.content,
-        created_at: existing.created_at,
-        whatsapp_msg_id: existing.whatsapp_msg_id,
-      }
-    : null;
+  return {
+    message: existing
+      ? {
+          id: existing.id,
+          ingest_seq: existing.ingest_seq,
+          content: existing.content,
+          created_at: existing.created_at,
+          whatsapp_msg_id: existing.whatsapp_msg_id,
+        }
+      : null,
+  };
 }
 
 async function drainConversationQueue(conversation: ConversationRow) {
   const token = await acquireConversationLock(conversation.id);
   if (!token) {
-    throw new Error(`Could not acquire conversation lock for ${conversation.id}`);
+    console.warn(`[webhook] Skipping queue drain because lock is busy for conversation ${conversation.id}`);
+    return;
   }
 
   try {
@@ -398,6 +424,14 @@ async function drainConversationQueue(conversation: ConversationRow) {
         state.last_processed_message_seq,
       );
       if (!nextMessage) break;
+
+      if (isStaleMessage(nextMessage, state)) {
+        await updateConversationState(state, {
+          last_processed_message_seq: nextMessage.ingest_seq,
+          last_error: null,
+        });
+        continue;
+      }
 
       const recentOrder = await getRecentOrderContext(conversation.id);
       const decision = decideTurn({
@@ -523,6 +557,7 @@ async function getNextPendingUserMessage(
     .select("id, ingest_seq, content, created_at, whatsapp_msg_id")
     .eq("conversation_id", conversationId)
     .eq("role", "user")
+    .order("created_at", { ascending: true })
     .order("ingest_seq", { ascending: true })
     .limit(1);
 
@@ -761,7 +796,40 @@ async function createOrderFromPayload(
 }
 
 function toIsoTimestamp(timestamp: string): string {
-  return new Date(Number.parseInt(timestamp, 10) * 1000).toISOString();
+  const parsed = Number.parseInt(timestamp, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return new Date().toISOString();
+  }
+
+  const date = new Date(parsed * 1000);
+  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+}
+
+function compareMessageTimestamps(left: string, right: string): number {
+  const leftValue = Number.parseInt(left, 10);
+  const rightValue = Number.parseInt(right, 10);
+
+  const leftValid = Number.isFinite(leftValue);
+  const rightValid = Number.isFinite(rightValue);
+  if (leftValid && rightValid) return leftValue - rightValue;
+  if (leftValid) return -1;
+  if (rightValid) return 1;
+  return 0;
+}
+
+function isStaleMessage(message: MessageRow, state: ConversationState): boolean {
+  if (!state.last_processed_user_message_at) {
+    return false;
+  }
+
+  const nextTime = new Date(message.created_at).getTime();
+  const lastProcessedTime = new Date(state.last_processed_user_message_at).getTime();
+
+  if (Number.isNaN(nextTime) || Number.isNaN(lastProcessedTime)) {
+    return false;
+  }
+
+  return nextTime < lastProcessedTime;
 }
 
 function isValidWhatsAppSignature(rawBody: string, signatureHeader: string | null): boolean {

@@ -42,7 +42,20 @@ export async function GET(
 
   const rows = data ?? [];
   const hasMore = rows.length > limit;
-  const messages = (hasMore ? rows.slice(0, limit) : rows).reverse();
+  const messages = (hasMore ? rows.slice(0, limit) : rows).sort((left, right) => {
+    const leftTime = new Date(left.created_at).getTime();
+    const rightTime = new Date(right.created_at).getTime();
+    const leftValid = Number.isFinite(leftTime);
+    const rightValid = Number.isFinite(rightTime);
+
+    if (leftValid && rightValid && leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+    if (leftValid && !rightValid) return -1;
+    if (!leftValid && rightValid) return 1;
+
+    return left.ingest_seq - right.ingest_seq;
+  });
 
   return NextResponse.json({
     messages,

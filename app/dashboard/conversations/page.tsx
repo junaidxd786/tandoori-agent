@@ -146,6 +146,30 @@ function formatMessageDay(dateText: string) {
   return format(new Date(dateText), "EEEE, dd MMM");
 }
 
+function compareMessagesByTimeline(left: Message, right: Message) {
+  const leftTime = new Date(left.created_at).getTime();
+  const rightTime = new Date(right.created_at).getTime();
+  const leftValid = Number.isFinite(leftTime);
+  const rightValid = Number.isFinite(rightTime);
+
+  if (leftValid && rightValid && leftTime !== rightTime) {
+    return leftTime - rightTime;
+  }
+  if (leftValid && !rightValid) return -1;
+  if (!leftValid && rightValid) return 1;
+
+  return left.ingest_seq - right.ingest_seq;
+}
+
+function mergeAndSortMessages(items: Message[]) {
+  const byId = new Map<string, Message>();
+  for (const item of items) {
+    byId.set(item.id, item);
+  }
+
+  return [...byId.values()].sort(compareMessagesByTimeline);
+}
+
 export default function ConversationsPage() {
   const { selectedBranchId, selectedBranch } = useDashboardContext();
   // --- State & Logic ---
@@ -221,7 +245,7 @@ export default function ConversationsPage() {
       if (!response.ok) throw new Error("Failed to load messages");
 
       const data = (await response.json()) as MessageResponse;
-      setMessages((current) => (isOlderRequest ? [...data.messages, ...current] : data.messages));
+      setMessages((current) => mergeAndSortMessages(isOlderRequest ? [...data.messages, ...current] : data.messages));
       setHasMoreMessages(data.hasMore);
     } catch (error) {
       console.error(error);
@@ -303,6 +327,10 @@ export default function ConversationsPage() {
   const activeState = pickState(activeConversation?.conversation_states);
   const draftLines = getDraftLines(activeState?.cart);
   const draftItemCount = draftLines.reduce((sum, item) => sum + item.qty, 0);
+  const oldestLoadedIngestSeq = useMemo(() => {
+    if (messages.length === 0) return null;
+    return messages.reduce((min, item) => Math.min(min, item.ingest_seq), messages[0].ingest_seq);
+  }, [messages]);
 
   const handleSend = async () => {
     if (!selectedId || !composer.trim()) return;
@@ -502,7 +530,7 @@ export default function ConversationsPage() {
                       <a href={`tel:${activeConversation.phone}`} className="flex items-center gap-1 hover:text-brand">
                         <Phone size={10} /> {activeConversation.phone}
                       </a>
-                      <span>•</span>
+                      <span>&bull;</span>
                       <span className="flex items-center gap-1">
                         <Sparkles size={10} className="text-brand" /> {formatStep(activeState?.workflow_step)}
                       </span>
@@ -563,8 +591,8 @@ export default function ConversationsPage() {
               {hasMoreMessages && (
                 <div className="mb-6 flex justify-center">
                   <button
-                    onClick={() => selectedId && void loadMessages(selectedId, messages[0]?.ingest_seq)}
-                    disabled={loadingOlder}
+                    onClick={() => selectedId && oldestLoadedIngestSeq != null && void loadMessages(selectedId, oldestLoadedIngestSeq)}
+                    disabled={loadingOlder || oldestLoadedIngestSeq == null}
                     className="rounded-full bg-white px-4 py-1.5 text-xs font-semibold text-slate-500 shadow-sm ring-1 ring-inset ring-slate-200 hover:bg-slate-50 disabled:opacity-50"
                   >
                     {loadingOlder ? "Loading..." : "Load older messages"}

@@ -127,6 +127,7 @@ create table if not exists conversation_states (
   upsell_item_name text,
   upsell_item_price numeric,
   upsell_offered boolean not null default false,
+  declined_upsells jsonb not null default '[]'::jsonb,
   summary_sent_at timestamptz,
   last_user_whatsapp_msg_id text,
   last_processed_user_message_id text,

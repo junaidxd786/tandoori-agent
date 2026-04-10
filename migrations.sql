@@ -126,6 +126,7 @@ create table if not exists conversation_states (
   upsell_item_name text,
   upsell_item_price numeric,
   upsell_offered boolean not null default false,
+  declined_upsells jsonb not null default '[]'::jsonb,
   summary_sent_at timestamptz,
   last_user_whatsapp_msg_id text,
   last_processed_user_message_id text,
@@ -147,6 +148,7 @@ alter table conversation_states add column if not exists resume_workflow_step te
 alter table conversation_states add column if not exists last_processed_message_seq bigint;
 alter table conversation_states add column if not exists last_presented_category text;
 alter table conversation_states add column if not exists last_presented_at timestamptz;
+alter table conversation_states add column if not exists declined_upsells jsonb not null default '[]'::jsonb;
 alter table conversation_states drop constraint if exists conversation_states_preferred_language_check;
 alter table conversation_states add constraint conversation_states_preferred_language_check check (preferred_language in ('english', 'roman_urdu')) not valid;
 alter table conversation_states drop constraint if exists conversation_states_workflow_step_check;

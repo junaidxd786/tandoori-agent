@@ -215,6 +215,7 @@ export interface Database {
           upsell_item_name: string | null;
           upsell_item_price: number | null;
           upsell_offered: boolean;
+          declined_upsells: Json;
           summary_sent_at: string | null;
           last_user_whatsapp_msg_id: string | null;
           last_processed_user_message_id: string | null;
@@ -242,6 +243,7 @@ export interface Database {
           upsell_item_name?: string | null;
           upsell_item_price?: number | null;
           upsell_offered?: boolean;
+          declined_upsells?: Json;
           summary_sent_at?: string | null;
           last_user_whatsapp_msg_id?: string | null;
           last_processed_user_message_id?: string | null;

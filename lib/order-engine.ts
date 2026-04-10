@@ -33,6 +33,21 @@ export interface DraftCartItem {
   category: string | null;
 }
 
+interface CartRemovalRequest {
+  name: string;
+  qty: number | "all";
+}
+
+interface AppliedCartRemoval {
+  name: string;
+  removedQty: number;
+}
+
+interface CartQuantityMutation {
+  name: string;
+  qty: number;
+}
+
 export interface ConversationState {
   conversation_id: string;
   workflow_step: WorkflowStep;
@@ -48,6 +63,7 @@ export interface ConversationState {
   upsell_item_name: string | null;
   upsell_item_price: number | null;
   upsell_offered: boolean;
+  declined_upsells: string[];
   summary_sent_at: string | null;
   last_user_whatsapp_msg_id: string | null;
   last_processed_user_message_id: string | null;
@@ -131,8 +147,16 @@ const NUMBER_WORDS: Record<string, number> = {
 };
 
 const YES_WORDS = [
+  "y",
+  "ye",
+  "yeah",
+  "yep",
+  "yup",
+  "ya",
   "haan",
   "han",
+  "haan ji",
+  "han ji",
   "ji",
   "jee",
   "yes",
@@ -156,9 +180,13 @@ const YES_WORDS = [
 ];
 
 const NO_WORDS = [
+  "n",
+  "na",
   "no",
+  "noo",
   "nahi",
   "nah",
+  "naah",
   "nope",
   "skip",
   "bas",
@@ -181,6 +209,34 @@ const CHANGE_WORDS = [
   "instead",
   "replace",
 ];
+const QUANTITY_MUTATION_WORDS = [
+  "change",
+  "make it",
+  "make that",
+  "set it",
+  "set that",
+  "instead",
+  "replace",
+  "update",
+];
+const REMOVAL_INTENT_WORDS = [
+  "remove",
+  "delete",
+  "without",
+  "minus",
+  "dont want",
+  "don't want",
+  "do not want",
+  "nahi chahiye",
+  "nahin chahiye",
+  "cancel this",
+];
+const SPLIT_CONNECTORS_PATTERN = /\s*(?:,|\band\b|\baur\b|&|\+)\s*/;
+const BUNDLE_ALIASES: Record<string, string[]> = {
+  family_deal: ["family deal", "family combo", "family package", "family platter", "deal family"],
+  deal_one: ["deal 1", "deal one", "1st deal", "first deal"],
+  combo_deal: ["combo", "combos", "meal deal", "value deal", "special deal", "package", "platter", "bucket"],
+};
 
 const CANCEL_WORDS = [
   "cancel",
@@ -360,13 +416,24 @@ const CATEGORY_ALIASES: Record<string, string[]> = {
   starter: ["starter", "starters", "appetizer", "appetizers"],
   karahi: ["karahi", "karhai"],
   biryani: ["biryani", "rice"],
-  dessert: ["dessert", "desserts", "sweet", "sweets"],
+  dessert: ["dessert", "desserts", "desert", "deserts", "sweet", "sweets", "meetha", "meeta"],
 };
 const STALE_DRAFT_HOURS = 4;
 const PRESENTED_CATEGORY_TTL_MINUTES = 30;
-const FUZZY_ITEM_AUTO_MATCH_THRESHOLD = 0.86;
-const FUZZY_ITEM_AMBIGUOUS_THRESHOLD = 0.74;
-const FUZZY_ITEM_MIN_MARGIN = 0.08;
+const FUZZY_ITEM_AUTO_MATCH_THRESHOLD = 0.83;
+const FUZZY_ITEM_AMBIGUOUS_THRESHOLD = 0.68;
+const FUZZY_ITEM_MIN_MARGIN = 0.06;
+const MENU_DESCRIPTOR_TOKENS = new Set([
+  "pcs",
+  "pc",
+  "piece",
+  "pieces",
+  "portion",
+  "serving",
+  "servings",
+  "scoop",
+  "scoops",
+]);
 
 export function getDefaultConversationState(conversationId: string): ConversationState {
   return {
@@ -384,6 +451,7 @@ export function getDefaultConversationState(conversationId: string): Conversatio
     upsell_item_name: null,
     upsell_item_price: null,
     upsell_offered: false,
+    declined_upsells: [],
     summary_sent_at: null,
     last_user_whatsapp_msg_id: null,
     last_processed_user_message_id: null,
@@ -400,6 +468,9 @@ export function parseConversationState(raw: Partial<ConversationState> & { conve
     ...getDefaultConversationState(raw.conversation_id),
     ...raw,
     cart: Array.isArray(raw.cart) ? raw.cart : [],
+    declined_upsells: Array.isArray(raw.declined_upsells)
+      ? raw.declined_upsells.filter((value): value is string => typeof value === "string")
+      : [],
   };
 }
 
@@ -408,7 +479,8 @@ export function decideTurn(context: TurnContext): TurnDecision {
   const preferredLanguage = inferPreferredLanguage(context.messageText, context.state.preferred_language);
   const prefersRomanUrdu = preferredLanguage === "roman_urdu";
   const state = context.state;
-  const menuItems = context.menuItems;
+  const allMenuItems = context.menuItems;
+  const menuItems = getAvailableMenuItems(allMenuItems);
   const orderIntent = hasOrderIntent(text);
   const shouldBlockForClosedHours = isOrderFlowAttempt(text, state, menuItems);
   const respond = (reply: string, statePatch: Partial<ConversationState>) =>
@@ -494,7 +566,89 @@ export function decideTurn(context: TurnContext): TurnDecision {
     }
   }
 
+  if (hasPendingSingleItemConfirmation(state)) {
+    const pendingItem = getPendingSingleItem(state, menuItems);
+    if (!pendingItem) {
+      return respond(
+        prefersRomanUrdu
+          ? "Maazrat, woh suggested item menu mein update ho gaya hai. Aap apna item dobara bhej dein."
+          : "Sorry, that suggested item was updated in the menu. Please send the item again.",
+        {
+          upsell_item_name: null,
+          upsell_item_price: null,
+          upsell_offered: false,
+        },
+      );
+    }
+
+    if (isExplicitYes(text)) {
+      return handleResolvedAdditions(
+        [
+          {
+            name: pendingItem.name,
+            price: pendingItem.price,
+            qty: extractAnyQuantity(text) ?? 1,
+            category: pendingItem.category,
+          },
+        ],
+        {
+          ...context,
+          state: {
+            ...state,
+            preferred_language: preferredLanguage,
+            upsell_item_name: null,
+            upsell_item_price: null,
+            upsell_offered: false,
+          },
+        },
+        preferredLanguage,
+        prefersRomanUrdu,
+      );
+    }
+
+    if (isExplicitNo(text)) {
+      return respond(
+        prefersRomanUrdu
+          ? "Theek hai. Koi aur item likh dein, partial naam bhi chalega."
+          : "No problem. Send another item name, even a partial one is fine.",
+        {
+          upsell_item_name: null,
+          upsell_item_price: null,
+          upsell_offered: false,
+        },
+      );
+    }
+  }
+
   if (state.workflow_step === "awaiting_confirmation") {
+    const removalRequests = findCartItemRemovalRequests(text, state.cart);
+    if (removalRequests.length > 0) {
+      const { updatedCart: reducedCart, removed } = applyCartRemovals(state.cart, removalRequests);
+      if (reducedCart.length === 0) {
+        return replyDecision(
+          prefersRomanUrdu
+            ? "Theek hai, maine woh items remove kar diye. Aap ki cart ab empty hai, naya item bhej dein."
+            : "Done, I removed those items. Your cart is empty now, so send any item to start again.",
+          resetDraftState(),
+          preferredLanguage,
+        );
+      }
+
+      return buildLogisticsOrSummaryReply({
+        ...context,
+        state: {
+          ...state,
+          cart: reducedCart,
+          preferred_language: preferredLanguage,
+          workflow_step: "collecting_items",
+          summary_sent_at: null,
+          upsell_item_name: null,
+          upsell_item_price: null,
+        },
+        overrideReplyPrefix: buildRemovedItemsMessage(removed, prefersRomanUrdu, reducedCart),
+      });
+    }
+
     const modificationItems = extractCartItems(text, menuItems, true);
     if (modificationItems.length > 0 || hasAny(text, CHANGE_WORDS)) {
       const mergedCart = mergeCartItems(state.cart, modificationItems);
@@ -590,11 +744,13 @@ export function decideTurn(context: TurnContext): TurnDecision {
     }
 
     if (isExplicitNo(text)) {
+      const declinedUpsells = addDeclinedUpsell(state.declined_upsells, suggestedItem?.name ?? state.upsell_item_name);
       return buildLogisticsOrSummaryReply({
         ...context,
         state: {
           ...state,
           cart: updatedCart,
+          declined_upsells: declinedUpsells,
           workflow_step: "awaiting_order_type",
           upsell_item_name: null,
           upsell_item_price: null,
@@ -871,6 +1027,46 @@ export function decideTurn(context: TurnContext): TurnDecision {
     return respond(buildRecentOrderReply(context.recentOrder, prefersRomanUrdu), {});
   }
 
+  if (state.cart.length > 0) {
+    const quantityMutations = findCartQuantityMutations(text, state.cart);
+    if (quantityMutations.length > 0) {
+      const updatedCart = applyCartQuantityMutations(state.cart, quantityMutations);
+      return buildLogisticsOrSummaryReply({
+        ...context,
+        state: {
+          ...state,
+          cart: updatedCart,
+          preferred_language: preferredLanguage,
+          summary_sent_at: null,
+        },
+        overrideReplyPrefix: buildQuantityUpdatedMessage(quantityMutations, prefersRomanUrdu, updatedCart),
+      });
+    }
+  }
+
+  const unavailableReference = findUnavailableMenuItemReference(text, allMenuItems);
+  if (unavailableReference && (orderIntent || hasExplicitQuantityHint(text) || requestLooksLikeItemSelection(text))) {
+    const alternatives = findAlternativeMenuItems(unavailableReference, menuItems);
+    const suggestionLine =
+      alternatives.length > 0
+        ? prefersRomanUrdu
+          ? `Available alternatives:\n${alternatives.map((item) => `- *${item.name}* - Rs. ${item.price}`).join("\n")}`
+          : `Available alternatives:\n${alternatives.map((item) => `- *${item.name}* - Rs. ${item.price}`).join("\n")}`
+        : null;
+
+    return respond(
+      [
+        prefersRomanUrdu
+          ? `Maazrat, *${unavailableReference.name}* abhi out of stock hai.`
+          : `Sorry, *${unavailableReference.name}* is currently out of stock.`,
+        suggestionLine,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      {},
+    );
+  }
+
   const browseIntent = isExplicitBrowseRequest(text);
   const activePresentedCategory = getActivePresentedCategory(state, menuItems);
   const contextualMenuItems = activePresentedCategory
@@ -885,6 +1081,19 @@ export function decideTurn(context: TurnContext): TurnDecision {
   const fuzzyMatches = additions.length === 0 && !browseIntent ? findFuzzyMenuMatches(text, contextualMenuItems) : [];
   const exactAmbiguousMatches = findAmbiguousMenuMatches(text, contextualMenuItems);
   const ambiguousMatches = exactAmbiguousMatches.length > 0 ? exactAmbiguousMatches : fuzzyMatches;
+  const likelyMenuSuggestions = !browseIntent ? findLikelyMenuSuggestions(text, contextualMenuItems, 4) : [];
+  const stateWithoutPendingSuggestion = hasPendingSingleItemConfirmation(state)
+    ? {
+        ...state,
+        upsell_item_name: null,
+        upsell_item_price: null,
+        upsell_offered: false,
+      }
+    : state;
+  const contextWithoutPendingSuggestion: TurnContext = {
+    ...context,
+    state: stateWithoutPendingSuggestion,
+  };
   const shouldPrioritizeItemSelection =
     (additions.length > 0 && !browseIntent) ||
     state.workflow_step !== "idle" ||
@@ -894,19 +1103,46 @@ export function decideTurn(context: TurnContext): TurnDecision {
 
   if (fuzzyMatches.length === 1 && additions.length === 0 && !browseIntent) {
     const [match] = fuzzyMatches;
+    const shouldAutoResolveSingleFuzzy =
+      hasRecentPresentedContext(state) ||
+      state.workflow_step !== "idle" ||
+      state.cart.length > 0 ||
+      orderIntent ||
+      hasExplicitQuantityHint(text) ||
+      (requestLooksLikeItemSelection(text) && !isPriceQuestion(text) && !hasAny(text, CATEGORY_QUESTION_WORDS));
+
+    if (shouldAutoResolveSingleFuzzy) {
+      return handleResolvedAdditions(
+        [
+          {
+            name: match.name,
+            price: match.price,
+            qty: extractAnyQuantity(text) ?? 1,
+            category: match.category,
+          },
+        ],
+        contextWithoutPendingSuggestion,
+        preferredLanguage,
+        prefersRomanUrdu,
+      );
+    }
+
     return respond(
       prefersRomanUrdu
-        ? `Kya aap *${match.name}* keh rahe hain? Agar haan, to item ka naam isi tarah bhej dein.`
-        : `Did you mean *${match.name}*? If yes, please send the item name like this.`,
+        ? `Kya aap *${match.name}* keh rahe hain? Reply *haan* likhein to main add kar doon.`
+        : `Did you mean *${match.name}*? Reply *yes* and I'll add it for you.`,
       {
         last_presented_category: match.category,
         last_presented_at: new Date().toISOString(),
+        upsell_item_name: match.name,
+        upsell_item_price: match.price,
+        upsell_offered: false,
       },
     );
   }
 
   if (additions.length > 0 && shouldPrioritizeItemSelection) {
-    return handleResolvedAdditions(additions, context, preferredLanguage, prefersRomanUrdu);
+    return handleResolvedAdditions(additions, contextWithoutPendingSuggestion, preferredLanguage, prefersRomanUrdu);
   }
 
   if (ambiguousMatches.length > 1 && (!browseIntent || orderIntent)) {
@@ -923,6 +1159,9 @@ export function decideTurn(context: TurnContext): TurnDecision {
       workflow_step: state.cart.length > 0 ? state.workflow_step : "idle",
       last_presented_category: getSingleCategoryOrNull(ambiguousMatches),
       last_presented_at: new Date().toISOString(),
+      upsell_item_name: null,
+      upsell_item_price: null,
+      upsell_offered: false,
     });
   }
 
@@ -930,6 +1169,9 @@ export function decideTurn(context: TurnContext): TurnDecision {
     return respond(maybeAppendCheckoutPrompt(buildCategoryListReply(menuItems, prefersRomanUrdu), state, prefersRomanUrdu), {
       last_presented_category: null,
       last_presented_at: new Date().toISOString(),
+      upsell_item_name: null,
+      upsell_item_price: null,
+      upsell_offered: false,
     });
   }
 
@@ -938,6 +1180,9 @@ export function decideTurn(context: TurnContext): TurnDecision {
     return respond(maybeAppendCheckoutPrompt(buildCategoryItemsReply(category, menuItems, prefersRomanUrdu), state, prefersRomanUrdu), {
       last_presented_category: category,
       last_presented_at: new Date().toISOString(),
+      upsell_item_name: null,
+      upsell_item_price: null,
+      upsell_offered: false,
     });
   }
 
@@ -951,7 +1196,11 @@ export function decideTurn(context: TurnContext): TurnDecision {
         state,
         prefersRomanUrdu,
       ),
-      {},
+      {
+        upsell_item_name: null,
+        upsell_item_price: null,
+        upsell_offered: false,
+      },
     );
   }
 
@@ -959,12 +1208,68 @@ export function decideTurn(context: TurnContext): TurnDecision {
     return buildLogisticsOrSummaryReply(context);
   }
 
+  if (likelyMenuSuggestions.length > 0 && (orderIntent || hasExplicitQuantityHint(text) || requestLooksLikeItemSelection(text))) {
+    if (likelyMenuSuggestions.length === 1) {
+      const [suggestion] = likelyMenuSuggestions;
+      return respond(
+        prefersRomanUrdu
+          ? `Mujhe lagta hai aap *${suggestion.name}* keh rahe hain. Reply *haan* likh dein aur main add kar doon.`
+          : `I think you mean *${suggestion.name}*. Reply *yes* and I'll add it for you.`,
+        {
+          last_presented_category: suggestion.category,
+          last_presented_at: new Date().toISOString(),
+          upsell_item_name: suggestion.name,
+          upsell_item_price: suggestion.price,
+          upsell_offered: false,
+        },
+      );
+    }
+
+    return respond(
+      prefersRomanUrdu
+        ? `Mujhe exact item clear nahi hua. In mein se konsa chahiye?\n${likelyMenuSuggestions
+            .slice(0, 4)
+            .map((item) => `- *${item.name}* - Rs. ${item.price}`)
+            .join("\n")}`
+        : `I couldn't identify the exact item yet. Which one did you mean?\n${likelyMenuSuggestions
+            .slice(0, 4)
+            .map((item) => `- *${item.name}* - Rs. ${item.price}`)
+            .join("\n")}`,
+      {
+        last_presented_category: getSingleCategoryOrNull(likelyMenuSuggestions),
+        last_presented_at: new Date().toISOString(),
+        upsell_item_name: null,
+        upsell_item_price: null,
+        upsell_offered: false,
+      },
+    );
+  }
+
   if (orderIntent || hasExplicitQuantityHint(text)) {
     return respond(
       prefersRomanUrdu
-        ? "Main exact menu item match nahi kar saka. Please item ka exact naam bhej dein ya category pooch lein."
-        : "I couldn't match that exact menu item. Please send the exact item name or ask for a category first.",
+        ? "Main exact item abhi match nahi kar saka. Aap partial naam bhi bhej sakte hain, ya category pooch lein."
+        : "I couldn't match that item yet. You can send a partial name, or ask for a category.",
       { preferred_language: preferredLanguage },
+    );
+  }
+
+  const lowConfidenceSuggestions = requestLooksLikeItemSelection(text)
+    ? findLikelyMenuSuggestions(text, menuItems, 2, 0.45)
+    : [];
+  if (lowConfidenceSuggestions.length > 0) {
+    return respond(
+      prefersRomanUrdu
+        ? `Kya aap in mein se kuch kehna chahte hain?\n${lowConfidenceSuggestions
+            .map((item) => `- *${item.name}* - Rs. ${item.price}`)
+            .join("\n")}`
+        : `Did you mean one of these?\n${lowConfidenceSuggestions
+            .map((item) => `- *${item.name}* - Rs. ${item.price}`)
+            .join("\n")}`,
+      {
+        last_presented_category: getSingleCategoryOrNull(lowConfidenceSuggestions),
+        last_presented_at: new Date().toISOString(),
+      },
     );
   }
 
@@ -982,6 +1287,58 @@ function buildLogisticsOrSummaryReply(
   const detectedType = detectOrderType(text) ?? state.order_type ?? (addressFromMessage ? "delivery" : null);
   const respond = (reply: string, statePatch: Partial<ConversationState>) =>
     replyDecision(reply, statePatch, preferredLanguage);
+  const removalRequests = findCartItemRemovalRequests(text, state.cart);
+  if (removalRequests.length > 0) {
+    const { updatedCart, removed } = applyCartRemovals(state.cart, removalRequests);
+    if (updatedCart.length === 0) {
+      return respond(
+        [
+          context.overrideReplyPrefix,
+          prefersRomanUrdu
+            ? "Theek hai, maine woh items remove kar diye. Aap ki cart ab empty hai, naya item bhej dein."
+            : "Done, I removed those items. Your cart is empty now, so send any item to start again.",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        resetDraftState(),
+      );
+    }
+
+    const draftStateAfterRemoval: ConversationState = {
+      ...state,
+      cart: updatedCart,
+      summary_sent_at: null,
+      upsell_item_name: null,
+      upsell_item_price: null,
+    };
+    const nextWorkflowStep = getResumeWorkflowStep(draftStateAfterRemoval);
+    const followUp =
+      buildResumePrompt(
+        {
+          ...draftStateAfterRemoval,
+          workflow_step: nextWorkflowStep,
+        },
+        prefersRomanUrdu,
+      ) ??
+      (prefersRomanUrdu ? "Aap delivery chahenge ya dine-in?" : "Would you like delivery or dine-in?");
+
+    return respond(
+      [
+        context.overrideReplyPrefix,
+        buildRemovedItemsMessage(removed, prefersRomanUrdu, updatedCart),
+        followUp,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      persistDraftState(state, {
+        cart: updatedCart,
+        summary_sent_at: null,
+        upsell_item_name: null,
+        upsell_item_price: null,
+        workflow_step: nextWorkflowStep,
+      }),
+    );
+  }
 
   if (!detectedType) {
     return respond(
@@ -1213,6 +1570,43 @@ function normalizeText(value: string): string {
     .trim();
 }
 
+function normalizeCompactText(value: string): string {
+  return normalizeText(value).replace(/\s+/g, "");
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasPhrase(text: string, phrase: string): boolean {
+  const normalizedPhrase = normalizeText(phrase);
+  if (!normalizedPhrase) return false;
+
+  const pattern = normalizedPhrase.includes(" ")
+    ? new RegExp(`(?:^|\\s)${escapeRegex(normalizedPhrase)}(?:$|\\s)`)
+    : new RegExp(`\\b${escapeRegex(normalizedPhrase)}\\b`);
+  return pattern.test(text);
+}
+
+function getAvailableMenuItems(menuItems: MenuCatalogItem[]): MenuCatalogItem[] {
+  return menuItems.filter((item) => item.is_available);
+}
+
+function findUnavailableMenuItemReference(text: string, menuItems: MenuCatalogItem[]): MenuCatalogItem | null {
+  const unavailableItems = menuItems.filter((item) => !item.is_available);
+  if (unavailableItems.length === 0) return null;
+  return findSingleMenuItemReference(text, unavailableItems);
+}
+
+function findAlternativeMenuItems(target: MenuCatalogItem, availableMenuItems: MenuCatalogItem[]): MenuCatalogItem[] {
+  const sameCategory = availableMenuItems.filter((item) => (item.category ?? "General") === (target.category ?? "General"));
+  if (sameCategory.length > 0) {
+    return sameCategory.slice(0, 3);
+  }
+
+  return findLikelyMenuSuggestions(target.name, availableMenuItems, 3, 0.45);
+}
+
 function inferPreferredLanguage(text: string, previous: LanguagePreference = "english"): LanguagePreference {
   const normalized = normalizeText(text);
   const romanScore = scoreSignals(normalized, ROMAN_URDU_SIGNAL_WORDS);
@@ -1249,7 +1643,7 @@ function scoreSignals(text: string, signalWords: string[]): number {
 }
 
 function hasAny(text: string, phrases: string[]): boolean {
-  return phrases.some((phrase) => text.includes(phrase));
+  return phrases.some((phrase) => hasPhrase(text, phrase));
 }
 
 function isGreeting(text: string): boolean {
@@ -1295,11 +1689,11 @@ function isOrderStatusQuestion(text: string): boolean {
 }
 
 function isExplicitYes(text: string): boolean {
-  return YES_WORDS.some((word) => text === word || text.includes(word));
+  return YES_WORDS.some((word) => hasPhrase(text, word));
 }
 
 function isExplicitNo(text: string): boolean {
-  return NO_WORDS.some((word) => text === word || text.includes(word));
+  return NO_WORDS.some((word) => hasPhrase(text, word));
 }
 
 function hasExplicitQuantityHint(text: string): boolean {
@@ -1342,7 +1736,7 @@ function getResumeWorkflowStep(state: ConversationState): WorkflowStep {
   if (state.order_type === "dine-in" && (!state.guests || !state.reservation_time)) return "awaiting_dine_in_details";
   if (!state.order_type) return "awaiting_order_type";
   if (state.summary_sent_at) return "awaiting_confirmation";
-  if (state.upsell_item_name) return "awaiting_upsell_reply";
+  if (state.upsell_item_name && state.upsell_offered) return "awaiting_upsell_reply";
   return "collecting_items";
 }
 
@@ -1442,6 +1836,7 @@ function parseReservationTime(text: string): string | null {
 
 function extractCartItems(text: string, menuItems: MenuCatalogItem[], aggressive: boolean): DraftCartItem[] {
   const normalized = normalizeText(text);
+  const normalizedCompact = normalizeCompactText(text);
   const explicitQuantityPresent = /\b(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|ek|aik|do|teen|char|chaar|panj|paanch|cheh|chay|saat|aath|ath|das)\b/.test(normalized);
   const results: DraftCartItem[] = [];
   const matchedIds = new Set<string>();
@@ -1461,9 +1856,12 @@ function extractCartItems(text: string, menuItems: MenuCatalogItem[], aggressive
     if (matchedIds.has(candidate.item.id)) continue;
 
     for (const phrase of candidate.phrases) {
-      if (!normalized.includes(phrase)) continue;
+      const phraseMatched = normalized.includes(phrase);
+      const compactPhrase = normalizeCompactText(phrase);
+      const compactMatched = !phraseMatched && compactPhrase.length >= 4 && normalizedCompact.includes(compactPhrase);
+      if (!phraseMatched && !compactMatched) continue;
 
-      const qty = extractQuantityNearPhrase(normalized, phrase);
+      const qty = phraseMatched ? extractQuantityNearPhrase(normalized, phrase) : extractAnyQuantity(normalized);
       if (!aggressive && qty == null) continue;
       if (!aggressive && qty === 1 && !explicitQuantityPresent && !hasOrderIntent(normalized)) continue;
 
@@ -1492,6 +1890,19 @@ function extractCartItems(text: string, menuItems: MenuCatalogItem[], aggressive
         });
       }
     }
+
+    if (results.length === 0) {
+      const bundleMatches = findBundleAliasMatches(normalized, menuItems);
+      if (bundleMatches.length === 1) {
+        const [item] = bundleMatches;
+        results.push({
+          name: item.name,
+          price: item.price,
+          qty: extractAnyQuantity(normalized) ?? 1,
+          category: item.category,
+        });
+      }
+    }
   }
 
   return results;
@@ -1500,12 +1911,20 @@ function extractCartItems(text: string, menuItems: MenuCatalogItem[], aggressive
 function buildItemPhrases(item: MenuCatalogItem): string[] {
   const base = normalizeText(item.name);
   const phrases = new Set<string>([base]);
+  const simplifiedTokens = getMeaningfulTokens(base).filter((token) => !MENU_DESCRIPTOR_TOKENS.has(token));
 
   const portionAtEndMatch = base.match(/^(.*)\b(half|full)\b$/);
   if (portionAtEndMatch) {
     const itemName = portionAtEndMatch[1].trim();
     const portion = portionAtEndMatch[2].trim();
     if (itemName) phrases.add(`${portion} ${itemName}`);
+  }
+
+  if (simplifiedTokens.length >= 2) {
+    const simplifiedPhrase = simplifiedTokens.join(" ");
+    if (simplifiedPhrase.length >= 4) {
+      phrases.add(simplifiedPhrase);
+    }
   }
 
   if (base.includes("soup")) {
@@ -1556,7 +1975,10 @@ function extractAnyQuantity(text: string): number | null {
 }
 
 function requestLooksLikeItemSelection(text: string): boolean {
-  return getMeaningfulTokens(text).length >= 2;
+  const tokens = getMeaningfulTokens(text);
+  if (tokens.length >= 2) return true;
+  if (tokens.length === 1 && tokens[0].length >= 5) return true;
+  return normalizeCompactText(text).length >= 8;
 }
 
 function hasActivePresentedCategory(state: ConversationState, menuItems: MenuCatalogItem[]): boolean {
@@ -1578,6 +2000,15 @@ function getActivePresentedCategory(state: ConversationState, menuItems: MenuCat
   return categoryExists ? state.last_presented_category : null;
 }
 
+function hasRecentPresentedContext(state: ConversationState): boolean {
+  if (!state.last_presented_at) return false;
+
+  const ageMs = Date.now() - new Date(state.last_presented_at).getTime();
+  if (Number.isNaN(ageMs)) return false;
+
+  return ageMs <= PRESENTED_CATEGORY_TTL_MINUTES * 60 * 1000;
+}
+
 function mergeCartItems(current: DraftCartItem[], additions: DraftCartItem[]): DraftCartItem[] {
   const merged = current.map((item) => ({ ...item }));
 
@@ -1591,6 +2022,200 @@ function mergeCartItems(current: DraftCartItem[], additions: DraftCartItem[]): D
   }
 
   return merged;
+}
+
+function hasRemovalIntent(text: string): boolean {
+  return hasAny(text, REMOVAL_INTENT_WORDS) || /(dont|don't|do not|nahi|nahin)\s+(want|chahiye|chahye)/.test(text);
+}
+
+function hasQuantityMutationIntent(text: string): boolean {
+  if (!hasExplicitQuantityHint(text)) return false;
+  return hasAny(text, QUANTITY_MUTATION_WORDS) || /\bmake\s+(it|that|this)\b/.test(text);
+}
+
+function cartToMenuItems(cart: DraftCartItem[]): MenuCatalogItem[] {
+  return cart.map((item, index) => ({
+    id: `cart-${index}`,
+    name: item.name,
+    price: item.price,
+    category: item.category,
+    is_available: true,
+  }));
+}
+
+function splitActionSegments(text: string): string[] {
+  const normalized = normalizeText(text);
+  const stripped = normalized
+    .replace(/\b(remove|delete|without|minus|dont want|don't want|do not want|nahi chahiye|nahin chahiye)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const segments = stripped.split(SPLIT_CONNECTORS_PATTERN).map((segment) => segment.trim()).filter(Boolean);
+  return segments.length > 0 ? segments : [normalized];
+}
+
+function resolveMenuMatchesFromSegment(segment: string, menuItems: MenuCatalogItem[]): MenuCatalogItem[] {
+  const exact = extractCartItems(segment, menuItems, true);
+  if (exact.length > 0) {
+    const names = new Set(exact.map((item) => normalizeText(item.name)));
+    return menuItems.filter((item) => names.has(normalizeText(item.name)));
+  }
+
+  const tokenMatches = findTokenMatchedItems(segment, menuItems);
+  if (tokenMatches.length > 0) return tokenMatches;
+
+  const fuzzyMatches = findFuzzyMenuMatches(segment, menuItems);
+  if (fuzzyMatches.length > 0) return fuzzyMatches;
+
+  const likelyMatches = findLikelyMenuSuggestions(segment, menuItems, 2, 0.5);
+  return likelyMatches;
+}
+
+function findCartItemRemovalRequests(text: string, cart: DraftCartItem[]): CartRemovalRequest[] {
+  if (cart.length === 0) return [];
+
+  const normalized = normalizeText(text);
+  if (!hasRemovalIntent(normalized)) return [];
+
+  if (/\b(all|everything|sab|sara|saara|poora|poori)\b/.test(normalized)) {
+    return cart.map((item) => ({
+      name: item.name,
+      qty: "all" as const,
+    }));
+  }
+
+  const cartMenuItems = cartToMenuItems(cart);
+  const requestsByName = new Map<string, CartRemovalRequest>();
+  const segments = splitActionSegments(normalized);
+
+  for (const segment of segments) {
+    const matched = resolveMenuMatchesFromSegment(segment, cartMenuItems);
+    if (matched.length === 0) continue;
+
+    const qty = extractAnyQuantity(segment);
+    for (const match of matched.slice(0, 3)) {
+      const key = normalizeText(match.name);
+      const existing = requestsByName.get(key);
+      const nextQty: number | "all" = qty && qty > 0 ? qty : "all";
+      if (!existing) {
+        requestsByName.set(key, { name: match.name, qty: nextQty });
+        continue;
+      }
+
+      if (existing.qty === "all" || nextQty === "all") {
+        requestsByName.set(key, { name: match.name, qty: "all" });
+      } else {
+        requestsByName.set(key, { name: match.name, qty: existing.qty + nextQty });
+      }
+    }
+  }
+
+  return [...requestsByName.values()];
+}
+
+function applyCartRemovals(
+  cart: DraftCartItem[],
+  requests: CartRemovalRequest[],
+): { updatedCart: DraftCartItem[]; removed: AppliedCartRemoval[] } {
+  const requestsByName = new Map(requests.map((request) => [normalizeText(request.name), request] as const));
+  const removed: AppliedCartRemoval[] = [];
+  const updatedCart: DraftCartItem[] = [];
+
+  for (const item of cart) {
+    const request = requestsByName.get(normalizeText(item.name));
+    if (!request) {
+      updatedCart.push(item);
+      continue;
+    }
+
+    if (request.qty === "all" || request.qty >= item.qty) {
+      removed.push({
+        name: item.name,
+        removedQty: item.qty,
+      });
+      continue;
+    }
+
+    removed.push({
+      name: item.name,
+      removedQty: request.qty,
+    });
+    updatedCart.push({
+      ...item,
+      qty: item.qty - request.qty,
+    });
+  }
+
+  return { updatedCart, removed };
+}
+
+function buildRemovedItemsMessage(removed: AppliedCartRemoval[], prefersRomanUrdu: boolean, updatedCart: DraftCartItem[]): string {
+  const removedSummary = removed
+    .map((item) => `*${item.name} x${item.removedQty}*`)
+    .join(", ");
+  const removalLine = prefersRomanUrdu
+    ? `Theek hai, maine ${removedSummary} remove kar diya.`
+    : `Done, I removed ${removedSummary}.`;
+
+  return [removalLine, `*Subtotal:* Rs. ${getCartSubtotal(updatedCart)}`].join("\n");
+}
+
+function findCartQuantityMutations(text: string, cart: DraftCartItem[]): CartQuantityMutation[] {
+  if (cart.length === 0) return [];
+  const normalized = normalizeText(text);
+  if (!hasQuantityMutationIntent(normalized)) return [];
+
+  const cartMenuItems = cartToMenuItems(cart);
+  const segments = normalized.split(SPLIT_CONNECTORS_PATTERN).map((segment) => segment.trim()).filter(Boolean);
+  const mutationsByName = new Map<string, CartQuantityMutation>();
+
+  for (const segment of segments) {
+    const qty = extractAnyQuantity(segment);
+    if (!qty || qty <= 0) continue;
+    const matched = resolveMenuMatchesFromSegment(segment, cartMenuItems);
+    if (matched.length === 0) continue;
+
+    const [firstMatch] = matched;
+    mutationsByName.set(normalizeText(firstMatch.name), {
+      name: firstMatch.name,
+      qty,
+    });
+  }
+
+  if (mutationsByName.size === 0 && cart.length === 1 && /\b(make|set|change|update)\s+(it|that|this)\b/.test(normalized)) {
+    const fallbackQty = extractAnyQuantity(normalized);
+    if (fallbackQty && fallbackQty > 0) {
+      mutationsByName.set(normalizeText(cart[0].name), {
+        name: cart[0].name,
+        qty: fallbackQty,
+      });
+    }
+  }
+
+  return [...mutationsByName.values()];
+}
+
+function applyCartQuantityMutations(cart: DraftCartItem[], mutations: CartQuantityMutation[]): DraftCartItem[] {
+  const mutationByName = new Map(mutations.map((mutation) => [normalizeText(mutation.name), mutation.qty] as const));
+  return cart.map((item) => {
+    const nextQty = mutationByName.get(normalizeText(item.name));
+    if (!nextQty) return item;
+    return {
+      ...item,
+      qty: nextQty,
+    };
+  });
+}
+
+function buildQuantityUpdatedMessage(
+  mutations: CartQuantityMutation[],
+  prefersRomanUrdu: boolean,
+  updatedCart: DraftCartItem[],
+): string {
+  const summary = mutations.map((mutation) => `*${mutation.name} x${mutation.qty}*`).join(", ");
+  const line = prefersRomanUrdu
+    ? `Theek hai, maine quantity update kar di: ${summary}.`
+    : `Done, I updated the quantity: ${summary}.`;
+  return [line, `*Subtotal:* Rs. ${getCartSubtotal(updatedCart)}`].join("\n");
 }
 
 function handleResolvedAdditions(
@@ -1620,7 +2245,7 @@ function handleResolvedAdditions(
     parseReservationTime(normalizeText(context.messageText)) != null;
 
   if (!context.state.upsell_offered && !bundledCheckoutDetails) {
-    const upsell = pickUpsell(mergedCart, context.menuItems);
+    const upsell = pickUpsell(mergedCart, context.menuItems, context.state.declined_upsells);
     if (upsell && !cartAlreadyHasItem(mergedCart, upsell.name)) {
       const question = prefersRomanUrdu
         ? `Kya aap *${upsell.name}* bhi add karna chahenge? - Rs. ${upsell.price}`
@@ -1663,8 +2288,13 @@ function buildAddedItemsMessage(items: DraftCartItem[], prefersRomanUrdu: boolea
   return lines.join("\n");
 }
 
-function pickUpsell(cart: DraftCartItem[], menuItems: MenuCatalogItem[]): MenuCatalogItem | null {
+function pickUpsell(
+  cart: DraftCartItem[],
+  menuItems: MenuCatalogItem[],
+  declinedUpsells: string[],
+): MenuCatalogItem | null {
   const cartText = cart.map((item) => normalizeText(item.name)).join(" ");
+  const declinedSet = new Set(declinedUpsells.map((name) => normalizeText(name)));
   const pairingPreferences = [
     { when: /(karahi)/, suggestions: ["naan", "tandoori roti"] },
     { when: /(biryani|rice)/, suggestions: ["raita", "salad"] },
@@ -1675,7 +2305,9 @@ function pickUpsell(cart: DraftCartItem[], menuItems: MenuCatalogItem[]): MenuCa
   for (const preference of pairingPreferences) {
     if (!preference.when.test(cartText)) continue;
     for (const suggestion of preference.suggestions) {
-      const found = menuItems.find((item) => normalizeText(item.name).includes(suggestion));
+      const found = menuItems.find(
+        (item) => item.is_available && normalizeText(item.name).includes(suggestion) && !declinedSet.has(normalizeText(item.name)),
+      );
       if (found) return found;
     }
   }
@@ -1686,7 +2318,42 @@ function pickUpsell(cart: DraftCartItem[], menuItems: MenuCatalogItem[]): MenuCa
 function getSuggestedUpsellItem(state: ConversationState, menuItems: MenuCatalogItem[]): MenuCatalogItem | null {
   const upsellItemName = state.upsell_item_name;
   if (!upsellItemName) return null;
-  return menuItems.find((item) => normalizeText(item.name) === normalizeText(upsellItemName)) ?? null;
+  return menuItems.find((item) => item.is_available && normalizeText(item.name) === normalizeText(upsellItemName)) ?? null;
+}
+
+function addDeclinedUpsell(history: string[], itemName: string | null): string[] {
+  if (!itemName) return history;
+  const normalizedItem = normalizeText(itemName);
+  if (!normalizedItem) return history;
+  if (history.some((name) => normalizeText(name) === normalizedItem)) return history;
+  return [...history, itemName];
+}
+
+function hasPendingSingleItemConfirmation(state: ConversationState): boolean {
+  const canUsePendingConfirmation =
+    state.workflow_step === "idle" ||
+    state.workflow_step === "collecting_items" ||
+    state.workflow_step === "awaiting_order_type";
+  if (!canUsePendingConfirmation) return false;
+
+  return Boolean(
+    state.upsell_item_name &&
+      typeof state.upsell_item_price === "number" &&
+      Number.isFinite(state.upsell_item_price) &&
+      !state.upsell_offered,
+  );
+}
+
+function getPendingSingleItem(state: ConversationState, menuItems: MenuCatalogItem[]): MenuCatalogItem | null {
+  if (!hasPendingSingleItemConfirmation(state)) return null;
+  const pendingName = state.upsell_item_name;
+  if (!pendingName) return null;
+
+  return (
+    menuItems.find((item) => normalizeText(item.name) === normalizeText(pendingName)) ??
+    menuItems.find((item) => normalizeCompactText(item.name) === normalizeCompactText(pendingName)) ??
+    null
+  );
 }
 
 function buildCategoryListReply(menuItems: MenuCatalogItem[], prefersRomanUrdu: boolean): string {
@@ -1772,8 +2439,18 @@ function getMenuCategories(menuItems: MenuCatalogItem[]): string[] {
 
 function findSingleMenuItemReference(text: string, menuItems: MenuCatalogItem[]): MenuCatalogItem | null {
   const matches = extractCartItems(text, menuItems, true);
-  if (matches.length !== 1) return null;
-  return menuItems.find((item) => normalizeText(item.name) === normalizeText(matches[0].name)) ?? null;
+  if (matches.length === 1) {
+    return menuItems.find((item) => normalizeText(item.name) === normalizeText(matches[0].name)) ?? null;
+  }
+
+  const tokenMatches = findTokenMatchedItems(text, menuItems);
+  if (tokenMatches.length === 1) return tokenMatches[0];
+
+  const fuzzyMatches = findFuzzyMenuMatches(text, menuItems);
+  if (fuzzyMatches.length === 1) return fuzzyMatches[0];
+
+  const likely = findLikelyMenuSuggestions(text, menuItems, 1);
+  return likely.length === 1 ? likely[0] : null;
 }
 
 function findAmbiguousMenuMatches(text: string, menuItems: MenuCatalogItem[]): MenuCatalogItem[] {
@@ -1794,30 +2471,109 @@ function findAmbiguousMenuMatches(text: string, menuItems: MenuCatalogItem[]): M
   return matches.length > 1 ? matches : [];
 }
 
+function findBundleAliasMatches(text: string, menuItems: MenuCatalogItem[]): MenuCatalogItem[] {
+  const normalized = normalizeText(text);
+  const matchedAliasKeys = Object.entries(BUNDLE_ALIASES)
+    .filter(([, aliases]) => aliases.some((alias) => hasPhrase(normalized, alias)))
+    .map(([key]) => key);
+
+  if (matchedAliasKeys.length === 0) return [];
+
+  const seen = new Set<string>();
+  const results: MenuCatalogItem[] = [];
+
+  const pushIfMatch = (item: MenuCatalogItem, condition: boolean) => {
+    if (!condition || seen.has(item.id)) return;
+    seen.add(item.id);
+    results.push(item);
+  };
+
+  for (const key of matchedAliasKeys) {
+    for (const item of menuItems) {
+      const itemText = normalizeText(item.name);
+      if (key === "family_deal") {
+        pushIfMatch(item, /\bfamily\b/.test(itemText) && /\b(deal|combo|package|platter|bucket|offer)\b/.test(itemText));
+        continue;
+      }
+
+      if (key === "deal_one") {
+        pushIfMatch(item, /\bdeal\s*(1|one)\b/.test(itemText) || /\b(1|one)\s*deal\b/.test(itemText));
+        continue;
+      }
+
+      if (key === "combo_deal") {
+        pushIfMatch(item, /\b(combo|deal|package|platter|bucket|offer)\b/.test(itemText));
+      }
+    }
+  }
+
+  if (results.length === 0 && matchedAliasKeys.includes("deal_one")) {
+    const numericCandidates = menuItems.filter((item) => /\b1\b/.test(normalizeText(item.name)));
+    for (const item of numericCandidates) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      results.push(item);
+    }
+  }
+
+  return results.slice(0, 6);
+}
+
 function findTokenMatchedItems(text: string, menuItems: MenuCatalogItem[]): MenuCatalogItem[] {
   const requestTokens = getMeaningfulTokens(text);
-  if (requestTokens.length < 2) return [];
+  if (requestTokens.length === 0) {
+    return findBundleAliasMatches(text, menuItems);
+  }
+  const compactRequest = requestTokens.join("");
 
-  return menuItems.filter((item) => {
-    const itemTokens = getMeaningfulTokens(item.name);
-    if (itemTokens.length < 2) return false;
-    return itemTokens.every((token) => requestTokens.includes(token));
+  const tokenMatches = menuItems.filter((item) => {
+    const itemTokens = getMeaningfulTokens(item.name).filter((token) => !MENU_DESCRIPTOR_TOKENS.has(token));
+    if (itemTokens.length === 0) return false;
+
+    const tokenAligned = requestTokens.every((requestToken) =>
+      itemTokens.some(
+        (itemToken) =>
+          itemToken === requestToken || itemToken.startsWith(requestToken) || requestToken.startsWith(itemToken),
+      ),
+    );
+    if (tokenAligned) return true;
+
+    if (requestTokens.length === 1 && requestTokens[0].length >= 4) {
+      return itemTokens.some(
+        (itemToken) =>
+          itemToken.startsWith(requestTokens[0]) || getNormalizedSimilarity(itemToken, requestTokens[0]) >= 0.8,
+      );
+    }
+
+    if (compactRequest.length >= 5) {
+      const itemCompact = itemTokens.join("");
+      return itemCompact.includes(compactRequest);
+    }
+
+    return false;
   });
+
+  if (tokenMatches.length > 0) return tokenMatches;
+  return findBundleAliasMatches(text, menuItems);
 }
 
 function findFuzzyMenuMatches(text: string, menuItems: MenuCatalogItem[]): MenuCatalogItem[] {
-  const requestText = getMeaningfulTokens(text).join(" ");
-  if (requestText.length < 4) return [];
+  const requestTokens = getMeaningfulTokens(text);
+  const requestText = requestTokens.join(" ");
+  const requestCompact = requestTokens.join("");
+  if (requestText.length < 3 && requestCompact.length < 4) {
+    return findBundleAliasMatches(text, menuItems);
+  }
 
   const scored = menuItems
     .map((item) => ({
       item,
-      score: getFuzzyItemScore(requestText, item),
+      score: getFuzzyItemScore(requestText, requestCompact, item),
     }))
     .filter((entry) => entry.score >= FUZZY_ITEM_AMBIGUOUS_THRESHOLD)
     .sort((left, right) => right.score - left.score);
 
-  if (scored.length === 0) return [];
+  if (scored.length === 0) return findBundleAliasMatches(text, menuItems);
 
   const [best, second] = scored;
   if (best.score >= FUZZY_ITEM_AUTO_MATCH_THRESHOLD && (!second || best.score - second.score >= FUZZY_ITEM_MIN_MARGIN)) {
@@ -1827,22 +2583,59 @@ function findFuzzyMenuMatches(text: string, menuItems: MenuCatalogItem[]): MenuC
   return scored.slice(0, 6).map((entry) => entry.item);
 }
 
-function getFuzzyItemScore(requestText: string, item: MenuCatalogItem): number {
-  const itemText = getMeaningfulTokens(item.name).join(" ");
+function findLikelyMenuSuggestions(text: string, menuItems: MenuCatalogItem[], limit = 3, minScore = 0.56): MenuCatalogItem[] {
+  const bundleAliasMatches = findBundleAliasMatches(text, menuItems);
+  if (bundleAliasMatches.length > 0) {
+    return bundleAliasMatches.slice(0, limit);
+  }
+
+  const requestTokens = getMeaningfulTokens(text);
+  if (requestTokens.length === 0) return [];
+  const requestText = requestTokens.join(" ");
+  const requestCompact = requestTokens.join("");
+
+  return menuItems
+    .map((item) => ({
+      item,
+      score: getFuzzyItemScore(requestText, requestCompact, item),
+    }))
+    .filter((entry) => entry.score >= minScore)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, limit)
+    .map((entry) => entry.item);
+}
+
+function getFuzzyItemScore(requestText: string, requestCompact: string, item: MenuCatalogItem): number {
+  const itemTokens = getMeaningfulTokens(item.name).filter((token) => !MENU_DESCRIPTOR_TOKENS.has(token));
+  const itemText = itemTokens.join(" ");
+  const itemCompact = itemTokens.join("");
   if (!itemText) return 0;
 
   const directSimilarity = getNormalizedSimilarity(requestText, itemText);
   const requestTokens = requestText.split(" ");
-  const itemTokens = itemText.split(" ");
   const tokenSimilarity =
-    requestTokens.reduce((total, requestToken) => {
-      const bestTokenScore = itemTokens.reduce((best, itemToken) => {
-        return Math.max(best, getNormalizedSimilarity(requestToken, itemToken));
-      }, 0);
-      return total + bestTokenScore;
-    }, 0) / requestTokens.length;
+    requestTokens.length === 0
+      ? 0
+      : requestTokens.reduce((total, requestToken) => {
+          const bestTokenScore = itemTokens.reduce((best, itemToken) => {
+            return Math.max(best, getNormalizedSimilarity(requestToken, itemToken));
+          }, 0);
+          return total + bestTokenScore;
+        }, 0) / requestTokens.length;
+  const compactSimilarity = requestCompact.length >= 4 ? getNormalizedSimilarity(requestCompact, itemCompact) : 0;
+  const compactContainment =
+    requestCompact.length >= 5 && (itemCompact.includes(requestCompact) || requestCompact.includes(itemCompact))
+      ? 0.97
+      : 0;
+  const prefixCoverage =
+    requestTokens.length === 0
+      ? 0
+      : requestTokens.reduce((total, requestToken) => {
+          const matched = itemTokens.some((itemToken) => itemToken.startsWith(requestToken));
+          return total + (matched ? 1 : 0);
+        }, 0) / requestTokens.length;
 
-  return Math.max(directSimilarity, tokenSimilarity);
+  return Math.max(directSimilarity, tokenSimilarity, compactSimilarity * 0.98, compactContainment, prefixCoverage * 0.9);
 }
 
 function getNormalizedSimilarity(left: string, right: string): number {
@@ -1896,6 +2689,7 @@ function persistDraftState(
 ): Partial<ConversationState> {
   return {
     cart: state.cart,
+    declined_upsells: state.declined_upsells,
     resume_workflow_step: state.resume_workflow_step,
     last_presented_category: state.last_presented_category,
     last_presented_at: state.last_presented_at,

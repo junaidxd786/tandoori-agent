@@ -113,9 +113,10 @@ export function sanitizeMenuItems(items: MenuItem[]) {
 }
 
 function formatMenuForAI(items: MenuCatalogItem[]): string | null {
-  if (items.length === 0) return null;
+  const availableItems = items.filter((item) => item.is_available);
+  if (availableItems.length === 0) return null;
 
-  const grouped = items.reduce<Record<string, string[]>>((accumulator, item) => {
+  const grouped = availableItems.reduce<Record<string, string[]>>((accumulator, item) => {
     const category = item.category?.trim() || "General";
     if (!accumulator[category]) accumulator[category] = [];
     accumulator[category].push(`- ${item.name} - Rs. ${Number(item.price)}`);
@@ -144,7 +145,6 @@ export async function getMenuCatalog(branchId: string): Promise<MenuCatalogItem[
     .from("menu_items")
     .select("id, name, price, category, is_available")
     .eq("branch_id", branchId)
-    .eq("is_available", true)
     .order("category", { ascending: true })
     .order("name", { ascending: true });
 
