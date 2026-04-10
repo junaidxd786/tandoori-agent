@@ -8,12 +8,17 @@ import {
   getBranchSelectionPrompt,
   isBranchChangeRequest,
 } from "@/lib/branches";
-import { OutboundMessageError, sendAndPersistOutboundMessage } from "@/lib/messages";
+import {
+  OutboundMessageError,
+  sendAndPersistOutboundInteractiveMessage,
+  sendAndPersistOutboundMessage,
+} from "@/lib/messages";
 import {
   decideTurn,
   getDefaultConversationState,
   inferLanguagePreference,
   parseConversationState,
+  type MenuCatalogItem,
   type TurnDecision,
   type ConversationState,
   type PlaceableOrderPayload,
@@ -30,6 +35,18 @@ type IncomingWhatsAppMessage = {
   type: string;
   timestamp: string;
   text?: { body?: string };
+  interactive?: {
+    type?: "button_reply" | "list_reply";
+    button_reply?: {
+      id?: string;
+      title?: string;
+    };
+    list_reply?: {
+      id?: string;
+      title?: string;
+      description?: string;
+    };
+  };
 };
 
 type IncomingEnvelope = {
@@ -121,7 +138,8 @@ async function processWebhook(body: unknown) {
   for (const event of events) {
     const { message, contactName } = event;
     const contact = await upsertContact(message.from, contactName);
-    const prefersRomanUrdu = inferLanguagePreference(message.text?.body ?? "", "english") === "roman_urdu";
+    const incomingContent = extractIncomingContent(message);
+    const prefersRomanUrdu = inferLanguagePreference(incomingContent ?? "", "english") === "roman_urdu";
     const activeBranch = contact.active_branch_id
       ? branches.find((branch) => branch.id === contact.active_branch_id) ?? null
       : null;
@@ -131,14 +149,14 @@ async function processWebhook(body: unknown) {
         await setActiveBranch(contact.id, null);
       }
 
-      if (message.type !== "text") {
+      if (!incomingContent) {
         if (message.type !== "reaction") {
           await sendWhatsAppMessage(message.from, getBranchSelectionPrompt(branches, prefersRomanUrdu));
         }
         continue;
       }
 
-      const selectedBranch = findBranchSelection(message.text?.body ?? "", branches);
+      const selectedBranch = findBranchSelection(incomingContent, branches);
       if (!selectedBranch) {
         await sendWhatsAppMessage(message.from, getBranchSelectionPrompt(branches, prefersRomanUrdu));
         continue;
@@ -154,7 +172,7 @@ async function processWebhook(body: unknown) {
       const createdAt = toIsoTimestamp(message.timestamp);
       const persistedMessage = await persistUserMessage(
         selectedConversation.id,
-        (message.text?.body || "").trim(),
+        incomingContent,
         message.id,
         createdAt,
       );
@@ -176,7 +194,7 @@ async function processWebhook(body: unknown) {
       continue;
     }
 
-    if (message.type !== "text") {
+    if (!incomingContent) {
       if (message.type !== "reaction") {
         await sendAndPersistAssistantMessage(
           conversation.id,
@@ -190,7 +208,7 @@ async function processWebhook(body: unknown) {
       continue;
     }
 
-    const content = (message.text?.body || "").trim();
+    const content = incomingContent;
     const createdAt = toIsoTimestamp(message.timestamp);
     const persistedMessage = await persistUserMessage(conversation.id, content, message.id, createdAt);
 
@@ -250,6 +268,25 @@ function extractIncomingMessages(body: unknown): IncomingMessageEvent[] {
   });
 
   return events;
+}
+
+function extractIncomingContent(message: IncomingWhatsAppMessage): string | null {
+  if (message.type === "text") {
+    const text = message.text?.body?.trim() ?? "";
+    return text || null;
+  }
+
+  if (message.type === "interactive") {
+    const listReply = message.interactive?.list_reply;
+    if (listReply?.id) return listReply.id.trim();
+    if (listReply?.title) return listReply.title.trim();
+
+    const buttonReply = message.interactive?.button_reply;
+    if (buttonReply?.id) return buttonReply.id.trim();
+    if (buttonReply?.title) return buttonReply.title.trim();
+  }
+
+  return null;
 }
 
 async function upsertContact(phone: string, name: string): Promise<ContactRow> {
@@ -413,11 +450,6 @@ async function drainConversationQueue(conversation: ConversationRow) {
       throw new Error(`Missing branch ${conversation.branch_id} for conversation ${conversation.id}`);
     }
 
-    const settings = await getRestaurantSettings(conversation.branch_id);
-    const isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
-    const menuItems = await getMenuCatalog(conversation.branch_id);
-    const menuForAI = await getMenuForAI(conversation.branch_id);
-
     while (true) {
       const state = await getOrCreateConversationState(conversation.id);
       const nextMessage = await getNextPendingUserMessage(
@@ -434,6 +466,10 @@ async function drainConversationQueue(conversation: ConversationRow) {
         continue;
       }
 
+      const settings = await getRestaurantSettings(conversation.branch_id);
+      const isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
+      const menuItems = await getMenuCatalog(conversation.branch_id);
+      const menuForAI = await getMenuForAI(conversation.branch_id);
       const recentOrder = await getRecentOrderContext(conversation.id);
       const decision = await decideTurn({
         messageText: nextMessage.content,
@@ -478,7 +514,18 @@ async function drainConversationQueue(conversation: ConversationRow) {
           );
         }
 
-        await sendAndPersistAssistantMessage(conversation.id, conversation.phone, reply);
+        const optionsFromState = Array.isArray(updatedState.last_presented_options)
+          ? updatedState.last_presented_options
+          : null;
+        const interactiveList =
+          optionsFromState && optionsFromState.length > 0
+            ? buildInteractiveListForPresentedOptions(
+              optionsFromState,
+              (updatedState.preferred_language ?? state.preferred_language) === "roman_urdu",
+            )
+            : null;
+
+        await sendAndPersistAssistantMessage(conversation.id, conversation.phone, reply, interactiveList);
         await updateConversationState(state, {
           ...updatedState,
           last_processed_user_message_id: nextMessage.whatsapp_msg_id,
@@ -691,7 +738,28 @@ async function getRecentOrderContext(conversationId: string): Promise<RecentOrde
   };
 }
 
-async function sendAndPersistAssistantMessage(conversationId: string, phone: string, content: string) {
+async function sendAndPersistAssistantMessage(
+  conversationId: string,
+  phone: string,
+  content: string,
+  interactiveList?: {
+    body: string;
+    buttonText: string;
+    sectionTitle?: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  } | null,
+) {
+  if (interactiveList && interactiveList.rows.length > 0) {
+    await sendAndPersistOutboundInteractiveMessage({
+      conversationId,
+      phone,
+      content,
+      senderKind: "ai",
+      interactive: interactiveList,
+    });
+    return;
+  }
+
   await sendAndPersistOutboundMessage({
     conversationId,
     phone,
@@ -870,6 +938,37 @@ async function createOrderFromPayload(
   }
 
   return order;
+}
+
+function buildInteractiveListForPresentedOptions(
+  options: MenuCatalogItem[],
+  prefersRomanUrdu: boolean,
+):
+  | {
+    body: string;
+    buttonText: string;
+    sectionTitle?: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  }
+  | null {
+  if (!Array.isArray(options) || options.length < 2 || options.length > 10) {
+    return null;
+  }
+
+  const rows = options.map((item, index) => ({
+    id: `menu_option_${index + 1}`,
+    title: item.name,
+    description: `Rs. ${item.price}${item.category ? ` • ${item.category}` : ""}`,
+  }));
+
+  return {
+    body: prefersRomanUrdu
+      ? "Apni pasand ka item list se select karein."
+      : "Please choose your item from the list.",
+    buttonText: prefersRomanUrdu ? "Select Item" : "Select Item",
+    sectionTitle: prefersRomanUrdu ? "Menu Options" : "Menu Options",
+    rows,
+  };
 }
 
 function toIsoTimestamp(timestamp: string): string {

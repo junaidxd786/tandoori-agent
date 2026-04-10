@@ -3,6 +3,19 @@ type WhatsAppSendResult = {
   raw: unknown;
 };
 
+export type WhatsAppInteractiveListRow = {
+  id: string;
+  title: string;
+  description?: string;
+};
+
+export type WhatsAppInteractiveListPayload = {
+  body: string;
+  buttonText: string;
+  sectionTitle?: string;
+  rows: WhatsAppInteractiveListRow[];
+};
+
 const STATUS_MESSAGES: Record<string, string> = {
   preparing: "Your order is being prepared. It will be ready soon.",
   out_for_delivery: "Your order is on the way and should reach you shortly.",
@@ -79,6 +92,93 @@ export async function sendWhatsAppMessage(to: string, body: string): Promise<Wha
   }
 
   throw lastError ?? new Error("WhatsApp send failed.");
+}
+
+export async function sendWhatsAppInteractiveList(
+  to: string,
+  payload: WhatsAppInteractiveListPayload,
+): Promise<WhatsAppSendResult> {
+  const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+
+  if (!phoneId || !token) {
+    throw new Error("WhatsApp credentials are missing.");
+  }
+
+  if (!payload.rows || payload.rows.length === 0) {
+    throw new Error("Interactive list requires at least one row.");
+  }
+
+  const rows = payload.rows.slice(0, 10).map((row) => ({
+    id: String(row.id).slice(0, 200),
+    title: String(row.title).slice(0, 24),
+    ...(row.description ? { description: String(row.description).slice(0, 72) } : {}),
+  }));
+
+  const body = payload.body.slice(0, 1024);
+  const buttonText = payload.buttonText.slice(0, 20);
+  const sectionTitle = (payload.sectionTitle || "Options").slice(0, 24);
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(`https://graph.facebook.com/v22.0/${phoneId}/messages`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to,
+          type: "interactive",
+          interactive: {
+            type: "list",
+            body: { text: body },
+            action: {
+              button: buttonText,
+              sections: [
+                {
+                  title: sectionTitle,
+                  rows,
+                },
+              ],
+            },
+          },
+        }),
+      });
+
+      const data = (await response.json()) as {
+        error?: { code?: number; message?: string };
+        messages?: Array<{ id?: string }>;
+      };
+
+      if (!response.ok) {
+        const errorMessage = data.error?.message || `WhatsApp interactive send failed with status ${response.status}`;
+        const error = new Error(errorMessage);
+        if (attempt < 3 && isRetriableStatus(response.status)) {
+          lastError = error;
+          await sleep(attempt * 400);
+          continue;
+        }
+        throw error;
+      }
+
+      return {
+        messageId: data.messages?.[0]?.id ?? null,
+        raw: data,
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Unknown WhatsApp interactive send failure");
+      if (attempt < 3) {
+        await sleep(attempt * 400);
+        continue;
+      }
+    }
+  }
+
+  throw lastError ?? new Error("WhatsApp interactive send failed.");
 }
 
 export async function notifyCustomer(phone: string, status: string, conversationId?: string) {

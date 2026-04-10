@@ -394,10 +394,17 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     );
   }
 
-  if (!context.isOpenNow && attemptsOrderAction(interpretation, state)) {
+  if (!context.isOpenNow && attemptsCheckoutProgression(interpretation, state, normalizedText)) {
     return replyDecision(
-      buildClosedReply(context.settings, prefersRomanUrdu),
-      withPreferredLanguage({}, preferredLanguage),
+      buildClosedReply(context.settings, prefersRomanUrdu, state.cart.length > 0),
+      withPreferredLanguage(
+        state.cart.length > 0
+          ? {
+            workflow_step: "collecting_items",
+          }
+          : {},
+        preferredLanguage,
+      ),
       trace,
     );
   }
@@ -514,12 +521,12 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   if (state.last_presented_options && state.last_presented_options.length > 0) {
-    const selection = parseSelectionNumber(normalizedText);
-    if (selection != null && selection >= 1 && selection <= state.last_presented_options.length) {
-      const selected = state.last_presented_options[selection - 1];
+    const selection = parseSelectionWithQty(normalizedText, state.last_presented_options.length);
+    if (selection) {
+      const selected = state.last_presented_options[selection.optionIndex];
       matchedAdds.matched.push({
         name: selected.name,
-        qty: extractAnyQuantity(normalizedText) ?? 1,
+        qty: selection.qty,
         price: selected.price,
         category: selected.category,
       });
@@ -666,6 +673,31 @@ function handleLogisticsAndFallback(params: {
   const normalizedText = normalizeText(context.messageText);
 
   if (state.workflow_step === "awaiting_order_type") {
+    const lastItemOverrideQty = inferLastItemQtyOverride(normalizedText, state);
+    if (lastItemOverrideQty != null) {
+      const updatedCart = applyLastItemQtyOverride(state.cart, lastItemOverrideQty);
+      return replyDecision(
+        [
+          prefersRomanUrdu
+            ? `Theek hai, maine quantity update kar di: ${updatedCart[updatedCart.length - 1].name} x${lastItemOverrideQty}.`
+            : `Done, quantity updated: ${updatedCart[updatedCart.length - 1].name} x${lastItemOverrideQty}.`,
+          !context.isOpenNow
+            ? buildClosedReply(context.settings, prefersRomanUrdu, true)
+            : prefersRomanUrdu
+              ? "Order type batayein: *Delivery* ya *Dine-in*."
+              : "Please choose order type: *Delivery* or *Dine-in*.",
+        ].join("\n\n"),
+        withPreferredLanguage(
+          {
+            cart: updatedCart,
+            workflow_step: context.isOpenNow ? "awaiting_order_type" : "collecting_items",
+          },
+          preferredLanguage,
+        ),
+        trace,
+      );
+    }
+
     if (interpretation.order_type) {
       return handleOrderTypeSelection(context, state, preferredLanguage, interpretation.order_type, trace);
     }
@@ -861,18 +893,43 @@ function isLikelyMenuRequest(text: string): boolean {
   return /(menu|show.*menu|what.*have|list.*items|kya.*hai|dikhao)/.test(text);
 }
 
-function attemptsOrderAction(interpretation: OrderTurnInterpretation, state: ConversationState): boolean {
-  if (state.cart.length > 0 || state.workflow_step !== "idle") return true;
-  return (
-    interpretation.intent === "add_items" ||
-    interpretation.intent === "remove_items" ||
-    interpretation.intent === "confirm_order" ||
+function attemptsCheckoutProgression(
+  interpretation: OrderTurnInterpretation,
+  state: ConversationState,
+  normalizedText: string,
+): boolean {
+  if (interpretation.intent === "confirm_order" || interpretation.wants_confirmation === true) {
+    return true;
+  }
+
+  if (state.workflow_step === "awaiting_confirmation" && isExplicitYes(normalizedText)) {
+    return true;
+  }
+
+  if (
     interpretation.intent === "set_order_type" ||
     interpretation.intent === "provide_address" ||
-    interpretation.intent === "provide_dine_in_details" ||
-    interpretation.add_items.length > 0 ||
-    interpretation.remove_items.length > 0
-  );
+    interpretation.intent === "provide_dine_in_details"
+  ) {
+    return true;
+  }
+
+  if (state.workflow_step === "awaiting_order_type" && interpretation.order_type != null) {
+    return true;
+  }
+
+  if (state.workflow_step === "awaiting_delivery_address" && interpretation.address != null) {
+    return true;
+  }
+
+  if (
+    state.workflow_step === "awaiting_dine_in_details" &&
+    (interpretation.guests != null || interpretation.reservation_time != null)
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function withPreferredLanguage(
@@ -1023,7 +1080,19 @@ function buildCategoryItemsReply(category: string, menuItems: MenuCatalogItem[],
   ].join("\n");
 }
 
-function buildClosedReply(settings: RestaurantSettings, romanUrdu: boolean): string {
+function buildClosedReply(settings: RestaurantSettings, romanUrdu: boolean, hasDraft: boolean): string {
+  if (!settings.is_accepting_orders) {
+    return romanUrdu
+      ? "Filhal orders manually pause hain. Aap ka draft save hai aur reopen par continue kar sakte hain."
+      : "Orders are currently paused by the restaurant. Your draft is saved and can continue when reopened.";
+  }
+
+  if (hasDraft) {
+    return romanUrdu
+      ? `Hum abhi closed hain (timings ${settings.opening_time} se ${settings.closing_time}). Aap ka draft save hai, continue kal kar sakte hain.`
+      : `We are currently closed (${settings.opening_time} to ${settings.closing_time}). Your draft is saved and you can continue when we reopen.`;
+  }
+
   return romanUrdu
     ? `Maazrat, hum abhi orders accept nahi kar rahe. Timings ${settings.opening_time} se ${settings.closing_time} hain.`
     : `Sorry, we are not accepting orders right now. Our timing is ${settings.opening_time} to ${settings.closing_time}.`;
@@ -1656,12 +1725,62 @@ function clampQty(qty: number): number {
   return Math.max(1, Math.min(Math.floor(qty), 50));
 }
 
-function parseSelectionNumber(text: string): number | null {
-  const match = text.match(/\b(\d{1,2})\b/);
-  if (!match) return null;
-  const value = Number.parseInt(match[1], 10);
-  if (!Number.isFinite(value)) return null;
-  return value;
+function parseSelectionWithQty(
+  text: string,
+  optionCount: number,
+): { optionIndex: number; qty: number } | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const explicitPair = trimmed.match(
+    /(?:^|\b)(?:option|item|no|number)?\s*(\d{1,2})(?:\s*(?:x|qty|quantity|times)\s*|[\s,]+)(\d{1,2})(?:\b|$)/i,
+  );
+  if (explicitPair) {
+    const option = Number.parseInt(explicitPair[1], 10);
+    const qty = Number.parseInt(explicitPair[2], 10);
+    if (option >= 1 && option <= optionCount && qty >= 1) {
+      return { optionIndex: option - 1, qty: clampQty(qty) };
+    }
+  }
+
+  const numbers = [...trimmed.matchAll(/\b(\d{1,2})\b/g)].map((match) => Number.parseInt(match[1], 10));
+  if (numbers.length === 1) {
+    const option = numbers[0];
+    if (option >= 1 && option <= optionCount) {
+      return { optionIndex: option - 1, qty: 1 };
+    }
+    return null;
+  }
+
+  if (numbers.length >= 2) {
+    const option = numbers[0];
+    const qty = numbers[1];
+    if (option >= 1 && option <= optionCount && qty >= 1) {
+      return { optionIndex: option - 1, qty: clampQty(qty) };
+    }
+  }
+
+  return null;
+}
+
+function inferLastItemQtyOverride(normalizedText: string, state: ConversationState): number | null {
+  if (state.cart.length === 0) return null;
+  const qty = extractAnyQuantity(normalizedText);
+  if (qty == null) return null;
+
+  const hasOnlySignal =
+    /(sirf|sirf aik|only|just|bas|chahiye|chahye|chaheye|i need|need only)/.test(normalizedText) ||
+    normalizedText === String(qty);
+
+  if (!hasOnlySignal) return null;
+  return clampQty(qty);
+}
+
+function applyLastItemQtyOverride(cart: DraftCartItem[], qty: number): DraftCartItem[] {
+  const updated = cart.map((item) => ({ ...item }));
+  const lastIndex = updated.length - 1;
+  updated[lastIndex].qty = qty;
+  return updated;
 }
 
 function parseAddress(raw: string): string | null {
