@@ -1,12 +1,17 @@
 import { supabaseAdmin } from "./supabase-admin";
 
 export interface RestaurantSettings {
+  branch_id: string;
   is_accepting_orders: boolean;
   opening_time: string;
   closing_time: string;
   min_delivery_amount: number;
   delivery_enabled: boolean;
   delivery_fee: number;
+  city: string;
+  phone_delivery: string;
+  phone_dine_in: string;
+  ai_personality: string;
 }
 
 export interface ParsedRestaurantClock {
@@ -26,6 +31,18 @@ type TimeZoneParts = {
 };
 
 const RESTAURANT_TIMEZONE = process.env.RESTAURANT_TIMEZONE || "Asia/Karachi";
+const DEFAULT_SETTINGS = {
+  is_accepting_orders: false,
+  opening_time: "10:00 AM",
+  closing_time: "11:00 PM",
+  min_delivery_amount: 0,
+  delivery_enabled: false,
+  delivery_fee: 0,
+  city: "Wah Cantt",
+  phone_delivery: "0341-1007722",
+  phone_dine_in: "051-4904211",
+  ai_personality: "Warm & Professional",
+};
 
 export function getRestaurantTimeZone(): string {
   return RESTAURANT_TIMEZONE;
@@ -130,7 +147,7 @@ export function buildRestaurantDateTimeIso(
 }
 
 export function validateRestaurantSettingsInput(settings: Partial<RestaurantSettings>) {
-  const normalized: Partial<RestaurantSettings> = {};
+  const normalized: Partial<Omit<RestaurantSettings, "branch_id">> = {};
 
   if (settings.is_accepting_orders !== undefined) {
     normalized.is_accepting_orders = Boolean(settings.is_accepting_orders);
@@ -172,6 +189,38 @@ export function validateRestaurantSettingsInput(settings: Partial<RestaurantSett
     normalized.closing_time = closingTime;
   }
 
+  if (settings.city !== undefined) {
+    const city = settings.city.trim();
+    if (!city) {
+      throw new Error("City is required.");
+    }
+    normalized.city = city;
+  }
+
+  if (settings.phone_delivery !== undefined) {
+    const phoneDelivery = settings.phone_delivery.trim();
+    if (!phoneDelivery) {
+      throw new Error("Delivery phone is required.");
+    }
+    normalized.phone_delivery = phoneDelivery;
+  }
+
+  if (settings.phone_dine_in !== undefined) {
+    const phoneDineIn = settings.phone_dine_in.trim();
+    if (!phoneDineIn) {
+      throw new Error("Dine-in phone is required.");
+    }
+    normalized.phone_dine_in = phoneDineIn;
+  }
+
+  if (settings.ai_personality !== undefined) {
+    const aiPersonality = settings.ai_personality.trim();
+    if (!aiPersonality) {
+      throw new Error("AI personality is required.");
+    }
+    normalized.ai_personality = aiPersonality;
+  }
+
   const candidateOpening = normalized.opening_time ?? settings.opening_time;
   const candidateClosing = normalized.closing_time ?? settings.closing_time;
   if (candidateOpening !== undefined && candidateClosing !== undefined) {
@@ -185,38 +234,58 @@ export function validateRestaurantSettingsInput(settings: Partial<RestaurantSett
   return normalized;
 }
 
-export async function getRestaurantSettings(): Promise<RestaurantSettings> {
+export async function getRestaurantSettings(branchId: string): Promise<RestaurantSettings> {
   const { data, error } = await supabaseAdmin
     .from("restaurant_settings")
     .select("*")
-    .eq("id", 1)
-    .single();
+    .eq("branch_id", branchId)
+    .maybeSingle();
 
   if (error || !data) {
     console.error("[getRestaurantSettings] Falling back to safe defaults:", error);
     return {
-      is_accepting_orders: false,
-      opening_time: "10:00 AM",
-      closing_time: "11:00 PM",
-      min_delivery_amount: 0,
-      delivery_enabled: false,
-      delivery_fee: 0,
+      branch_id: branchId,
+      ...DEFAULT_SETTINGS,
     };
   }
 
   return {
+    branch_id: data.branch_id,
     is_accepting_orders: data.is_accepting_orders,
     opening_time: data.opening_time,
     closing_time: data.closing_time,
     min_delivery_amount: Number(data.min_delivery_amount ?? 0),
     delivery_enabled: Boolean(data.delivery_enabled),
     delivery_fee: Number(data.delivery_fee ?? 0),
+    city: data.city ?? DEFAULT_SETTINGS.city,
+    phone_delivery: data.phone_delivery ?? DEFAULT_SETTINGS.phone_delivery,
+    phone_dine_in: data.phone_dine_in ?? DEFAULT_SETTINGS.phone_dine_in,
+    ai_personality: data.ai_personality ?? DEFAULT_SETTINGS.ai_personality,
   };
 }
 
-export async function updateRestaurantSettings(settings: Partial<RestaurantSettings>) {
+export async function updateRestaurantSettings(branchId: string, settings: Partial<RestaurantSettings>) {
   const validated = validateRestaurantSettingsInput(settings);
-  const { error } = await supabaseAdmin.from("restaurant_settings").update(validated).eq("id", 1);
+  const { data: existing, error: existingError } = await supabaseAdmin
+    .from("restaurant_settings")
+    .select("id")
+    .eq("branch_id", branchId)
+    .maybeSingle();
+
+  if (existingError) {
+    console.error("[updateRestaurantSettings] Lookup failed:", existingError);
+    throw new Error("Failed to update settings");
+  }
+
+  const operation = existing
+    ? supabaseAdmin.from("restaurant_settings").update(validated).eq("branch_id", branchId)
+    : supabaseAdmin.from("restaurant_settings").insert({
+        branch_id: branchId,
+        ...DEFAULT_SETTINGS,
+        ...validated,
+      });
+
+  const { error } = await operation;
   if (error) {
     console.error("[updateRestaurantSettings] Failed:", error);
     throw new Error("Failed to update settings");

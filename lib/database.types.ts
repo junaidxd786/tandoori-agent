@@ -15,9 +15,9 @@ export type OrderStatus =
 
 export type OrderType = "delivery" | "dine-in";
 export type LanguagePreference = "english" | "roman_urdu";
-
 export type WorkflowStep =
   | "idle"
+  | "awaiting_branch_selection"
   | "collecting_items"
   | "awaiting_upsell_reply"
   | "awaiting_order_type"
@@ -28,13 +28,56 @@ export type WorkflowStep =
 
 export type MessageSenderKind = "user" | "ai" | "human" | "system";
 export type MessageDeliveryStatus = "pending" | "sent" | "failed";
+export type StaffRole = "admin" | "branch_staff";
 
 export interface Database {
   public: {
     Tables: {
+      branches: {
+        Row: {
+          id: string;
+          slug: string;
+          name: string;
+          address: string;
+          is_active: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          slug: string;
+          name: string;
+          address: string;
+          is_active?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database["public"]["Tables"]["branches"]["Insert"]>;
+      };
+      contacts: {
+        Row: {
+          id: string;
+          phone: string;
+          name: string | null;
+          active_branch_id: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          phone: string;
+          name?: string | null;
+          active_branch_id?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database["public"]["Tables"]["contacts"]["Insert"]>;
+      };
       conversations: {
         Row: {
           id: string;
+          contact_id: string;
+          branch_id: string;
           phone: string;
           name: string | null;
           mode: "agent" | "human";
@@ -45,6 +88,8 @@ export interface Database {
         };
         Insert: {
           id?: string;
+          contact_id: string;
+          branch_id: string;
           phone: string;
           name?: string | null;
           mode?: "agent" | "human";
@@ -85,6 +130,7 @@ export interface Database {
       restaurant_settings: {
         Row: {
           id: number;
+          branch_id: string;
           is_accepting_orders: boolean;
           opening_time: string;
           closing_time: string;
@@ -95,6 +141,7 @@ export interface Database {
         };
         Insert: {
           id?: number;
+          branch_id: string;
           is_accepting_orders?: boolean;
           opening_time?: string;
           closing_time?: string;
@@ -108,6 +155,7 @@ export interface Database {
       menu_items: {
         Row: {
           id: string;
+          branch_id: string;
           name: string;
           price: number;
           category: string | null;
@@ -119,6 +167,7 @@ export interface Database {
         };
         Insert: {
           id?: string;
+          branch_id: string;
           name: string;
           price: number;
           category?: string | null;
@@ -133,6 +182,7 @@ export interface Database {
       menu_uploads: {
         Row: {
           id: string;
+          branch_id: string;
           image_url: string;
           status: "pending" | "processing" | "completed" | "error";
           error_message: string | null;
@@ -140,6 +190,7 @@ export interface Database {
         };
         Insert: {
           id?: string;
+          branch_id: string;
           image_url: string;
           status?: "pending" | "processing" | "completed" | "error";
           error_message?: string | null;
@@ -207,6 +258,7 @@ export interface Database {
       orders: {
         Row: {
           id: string;
+          branch_id: string;
           conversation_id: string;
           source_user_message_id: string | null;
           order_number: number;
@@ -227,6 +279,7 @@ export interface Database {
         };
         Insert: {
           id?: string;
+          branch_id: string;
           conversation_id: string;
           source_user_message_id?: string | null;
           order_number?: number;
@@ -265,6 +318,38 @@ export interface Database {
           created_at?: string;
         };
         Update: Partial<Database["public"]["Tables"]["order_items"]["Insert"]>;
+      };
+      staff_profiles: {
+        Row: {
+          user_id: string;
+          full_name: string | null;
+          role: StaffRole;
+          default_branch_id: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          user_id: string;
+          full_name?: string | null;
+          role?: StaffRole;
+          default_branch_id?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database["public"]["Tables"]["staff_profiles"]["Insert"]>;
+      };
+      staff_branch_access: {
+        Row: {
+          user_id: string;
+          branch_id: string;
+          created_at: string;
+        };
+        Insert: {
+          user_id: string;
+          branch_id: string;
+          created_at?: string;
+        };
+        Update: Partial<Database["public"]["Tables"]["staff_branch_access"]["Insert"]>;
       };
     };
   };

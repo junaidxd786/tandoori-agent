@@ -4,7 +4,7 @@ import { MessageSquare, ShoppingBag, TrendingUp, Zap, Settings, Activity, ArrowU
 import Link from "next/link";
 import { formatDistanceToNow } from "date-fns";
 import { clsx } from "clsx";
-import { supabase } from "@/lib/supabase";
+import { useDashboardContext } from "@/app/components/dashboard/DashboardProvider";
 
 const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; dot: string }> = {
   received: { label: "New", bg: "bg-blue-50", text: "text-blue-700", dot: "bg-blue-500" },
@@ -21,6 +21,7 @@ type DashboardOrder = {
   type: "delivery" | "dine-in";
   subtotal: number;
   created_at: string;
+  branches?: { name?: string | null } | null;
   conversations?: { name?: string | null } | null;
 };
 
@@ -29,6 +30,7 @@ type DashboardConversation = {
 };
 
 export default function DashboardPage() {
+  const { selectedBranchId, selectedBranch } = useDashboardContext();
   const [stats, setStats] = useState({
     active: 0, today: 0, revenue: 0, chats: 0,
     breakdown: {} as Record<string, number>
@@ -39,9 +41,10 @@ export default function DashboardPage() {
 
   const fetchData = useCallback(async () => {
     try {
+      const branchQuery = selectedBranchId === "all" ? "" : `&branch_id=${encodeURIComponent(selectedBranchId)}`;
       const [cRes, oRes] = await Promise.all([
-        fetch("/api/conversations?limit=80", { headers: { "ngrok-skip-browser-warning": "69420" } }),
-        fetch("/api/orders?limit=80", { headers: { "ngrok-skip-browser-warning": "69420" } })
+        fetch(`/api/conversations?limit=80${branchQuery}`, { headers: { "ngrok-skip-browser-warning": "69420" } }),
+        fetch(`/api/orders?limit=80${branchQuery}`, { headers: { "ngrok-skip-browser-warning": "69420" } })
       ]);
       const conversations = (await cRes.json()) as DashboardConversation[];
       const orders = (await oRes.json()) as DashboardOrder[];
@@ -68,22 +71,16 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedBranchId]);
 
   useEffect(() => {
     void fetchData();
   }, [fetchData]);
 
   useEffect(() => {
-    const channel = supabase
-      .channel("dashboard-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => void fetchData())
-      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => void fetchData())
-      .on("postgres_changes", { event: "*", schema: "public", table: "conversations" }, () => void fetchData())
-      .subscribe();
-
+    const interval = window.setInterval(() => void fetchData(), 12000);
     return () => {
-      supabase.removeChannel(channel);
+      window.clearInterval(interval);
     };
   }, [fetchData]);
 
@@ -94,7 +91,9 @@ export default function DashboardPage() {
         <div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight mb-1">Dashboard</h1>
           <p className="text-slate-500 text-sm">
-            Performance metrics for <span className="font-medium text-slate-700">{new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</span>
+            {selectedBranch
+              ? `Branch focus: ${selectedBranch.name} - ${selectedBranch.address}`
+              : "Admin overview across all active branches."}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -181,6 +180,12 @@ export default function DashboardPage() {
                           <span className="text-xs text-slate-500">Order #{o.order_number}</span>
                           <span className="w-1 h-1 rounded-full bg-slate-300" />
                           <span className="text-xs text-slate-500 capitalize">{o.type}</span>
+                          {o.branches?.name ? (
+                            <>
+                              <span className="w-1 h-1 rounded-full bg-slate-300" />
+                              <span className="text-xs text-slate-500">{o.branches.name}</span>
+                            </>
+                          ) : null}
                         </div>
                       </div>
                     </div>

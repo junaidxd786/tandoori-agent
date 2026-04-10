@@ -4,12 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clsx } from "clsx";
 import { format, formatDistanceToNow, isSameDay } from "date-fns";
 import {
-  AlertCircle,
   ArrowLeft,
   Bot,
-  Clock3,
   Loader2,
-  MapPin,
   Package,
   Phone,
   RefreshCw,
@@ -23,7 +20,7 @@ import {
   MessageSquareText
 } from "lucide-react";
 import { toast } from "sonner";
-import { supabase } from "@/lib/supabase";
+import { useDashboardContext } from "@/app/components/dashboard/DashboardProvider";
 
 // --- Types & Helpers ---
 type ConversationMode = "agent" | "human";
@@ -41,12 +38,14 @@ interface ConversationState {
 
 interface ConversationPreview {
   id: string;
+  branch_id: string;
   phone: string;
   name: string | null;
   mode: ConversationMode;
   has_unread: boolean;
   updated_at: string;
   created_at: string;
+  branches?: { id: string; name: string; slug: string; address: string } | null;
   conversation_states?: ConversationState | ConversationState[] | null;
   messages?: Array<{
     content: string;
@@ -148,6 +147,7 @@ function formatMessageDay(dateText: string) {
 }
 
 export default function ConversationsPage() {
+  const { selectedBranchId, selectedBranch } = useDashboardContext();
   // --- State & Logic ---
   const [conversations, setConversations] = useState<ConversationPreview[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -173,7 +173,8 @@ export default function ConversationsPage() {
     else setLoadingList(true);
 
     try {
-      const response = await fetch("/api/conversations?limit=100", {
+      const branchQuery = selectedBranchId === "all" ? "" : `&branch_id=${encodeURIComponent(selectedBranchId)}`;
+      const response = await fetch(`/api/conversations?limit=100${branchQuery}`, {
         cache: "no-store",
         headers: { "ngrok-skip-browser-warning": "69420" },
       });
@@ -188,7 +189,7 @@ export default function ConversationsPage() {
       setLoadingList(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [selectedBranchId]);
 
   const loadConversation = useCallback(async (conversationId: string) => {
     const response = await fetch(`/api/conversations/${conversationId}`, {
@@ -268,20 +269,13 @@ export default function ConversationsPage() {
   }, [loadConversation, loadMessages, markConversationRead, selectedId]);
 
   useEffect(() => {
-    const channel = supabase
-      .channel("conversations-page-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "conversations" }, () => {
-        void loadConversations(true);
-        if (selectedIdRef.current) void loadConversation(selectedIdRef.current);
-      })
-      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => {
-        void loadConversations(true);
-        if (selectedIdRef.current) void loadMessages(selectedIdRef.current);
-      })
-      .subscribe();
-
+    const interval = window.setInterval(() => {
+      void loadConversations(true);
+      if (selectedIdRef.current) void loadConversation(selectedIdRef.current);
+      if (selectedIdRef.current) void loadMessages(selectedIdRef.current);
+    }, 12000);
     return () => {
-      supabase.removeChannel(channel);
+      window.clearInterval(interval);
     };
   }, [loadConversation, loadConversations, loadMessages]);
 
@@ -387,6 +381,9 @@ export default function ConversationsPage() {
               className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-3 text-sm outline-none transition-all focus:border-brand/50 focus:bg-white focus:ring-2 focus:ring-brand/10"
             />
           </div>
+          <p className="mt-3 text-xs text-slate-500">
+            {selectedBranch ? `Viewing ${selectedBranch.name}` : "Viewing all accessible branches"}
+          </p>
         </div>
 
         <div className="flex-1 overflow-y-auto p-3 overscroll-contain">
@@ -442,6 +439,13 @@ export default function ConversationsPage() {
                         </p>
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           {item.has_unread && <span className="h-2 w-2 rounded-full bg-red-500 self-center" />}
+                          {item.branches?.name ? (
+                            <span className={clsx("rounded-md px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider",
+                              isActive ? "bg-white/10 text-white/90" : "bg-blue-50 text-blue-700"
+                            )}>
+                              {item.branches.name}
+                            </span>
+                          ) : null}
                           <span className={clsx("flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider", 
                             isActive 
                               ? item.mode === "agent" ? "bg-white/20 text-white" : "bg-amber-400/20 text-amber-100"

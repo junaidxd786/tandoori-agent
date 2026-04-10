@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import type { BranchSummary } from "./branches";
 import type { LanguagePreference } from "./order-engine";
 import type { RestaurantSettings } from "./settings";
 
@@ -8,25 +9,28 @@ const client = new OpenAI({
 });
 
 function buildSupportPrompt(
+  branch: BranchSummary,
   settings: RestaurantSettings,
   isOpenNow: boolean,
   hasHistory: boolean,
   preferredLanguage: LanguagePreference,
 ): string {
   const appName = process.env.NEXT_PUBLIC_APP_NAME || "Restaurant";
-  const city = process.env.NEXT_PUBLIC_APP_CITY || "";
-  const address = process.env.NEXT_PUBLIC_APP_ADDRESS || "";
-  const phone = process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "our support line";
+  const city = settings.city?.trim() || "";
+  const phone = settings.phone_delivery?.trim() || "our support line";
+  const aiPersonality = settings.ai_personality?.trim() || "Warm & Professional";
   const languageInstruction =
     preferredLanguage === "roman_urdu"
       ? "Reply only in natural Roman Urdu written in English letters. Do not switch to formal Urdu script or English unless the menu item name itself is English."
       : "Reply only in natural English. Do not switch to Roman Urdu.";
 
   return [
-    `You are the official WhatsApp assistant for ${appName} in ${city}.`,
+    `You are the official WhatsApp assistant for ${appName}${city ? ` in ${city}` : ""}.`,
+    `Selected branch: ${branch.name}.`,
+    `Brand voice: ${aiPersonality}.`,
     `Restaurant status: ${isOpenNow ? "OPEN" : "CLOSED"}.`,
     `Hours: ${settings.opening_time} to ${settings.closing_time}.`,
-    `Address: ${address}.`,
+    `Branch address: ${branch.address}.`,
     `Support phone: ${phone}.`,
     "Keep replies short, warm, and plain-text WhatsApp friendly.",
     languageInstruction,
@@ -51,11 +55,12 @@ export async function getCustomerSupportReply(
   hasHistory: boolean,
   settings: RestaurantSettings,
   preferredLanguage: LanguagePreference,
+  branch: BranchSummary,
 ): Promise<string> {
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     {
       role: "system",
-      content: buildSupportPrompt(settings, isOpenNow, hasHistory, preferredLanguage),
+      content: buildSupportPrompt(branch, settings, isOpenNow, hasHistory, preferredLanguage),
     },
   ];
 

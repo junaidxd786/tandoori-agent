@@ -34,8 +34,6 @@ export type MenuCatalogItem = {
   is_available: boolean;
 };
 
-const MENU_CATALOG_CACHE_KEY = "menu_catalog";
-const MENU_AI_CACHE_KEY = "menu_ai";
 const MENU_CACHE_TTL_MS = 30 * 1000;
 
 function normalizeWhitespace(value: string): string {
@@ -129,13 +127,23 @@ function formatMenuForAI(items: MenuCatalogItem[]): string | null {
     .join("\n\n");
 }
 
-export async function getMenuCatalog(): Promise<MenuCatalogItem[]> {
-  const cached = getCached<MenuCatalogItem[]>(MENU_CATALOG_CACHE_KEY);
+function getMenuCatalogCacheKey(branchId: string) {
+  return `menu_catalog:${branchId}`;
+}
+
+function getMenuAiCacheKey(branchId: string) {
+  return `menu_ai:${branchId}`;
+}
+
+export async function getMenuCatalog(branchId: string): Promise<MenuCatalogItem[]> {
+  const cacheKey = getMenuCatalogCacheKey(branchId);
+  const cached = getCached<MenuCatalogItem[]>(cacheKey);
   if (cached) return cached;
 
   const { data, error } = await supabaseAdmin
     .from("menu_items")
     .select("id, name, price, category, is_available")
+    .eq("branch_id", branchId)
     .eq("is_available", true)
     .order("category", { ascending: true })
     .order("name", { ascending: true });
@@ -153,28 +161,30 @@ export async function getMenuCatalog(): Promise<MenuCatalogItem[]> {
     is_available: item.is_available ?? true,
   }));
 
-  setCached(MENU_CATALOG_CACHE_KEY, items, MENU_CACHE_TTL_MS);
+  setCached(cacheKey, items, MENU_CACHE_TTL_MS);
   return items;
 }
 
-export async function getMenuForAI(): Promise<string | null> {
-  const cached = getCached<string>(MENU_AI_CACHE_KEY);
+export async function getMenuForAI(branchId: string): Promise<string | null> {
+  const cacheKey = getMenuAiCacheKey(branchId);
+  const cached = getCached<string>(cacheKey);
   if (cached) return cached;
 
-  const items = await getMenuCatalog();
+  const items = await getMenuCatalog(branchId);
   const formatted = formatMenuForAI(items);
   if (formatted) {
-    setCached(MENU_AI_CACHE_KEY, formatted, MENU_CACHE_TTL_MS);
+    setCached(cacheKey, formatted, MENU_CACHE_TTL_MS);
   }
   return formatted;
 }
 
-export function invalidateMenuCache(): void {
-  invalidateCache(MENU_CATALOG_CACHE_KEY);
-  invalidateCache(MENU_AI_CACHE_KEY);
+export function invalidateMenuCache(branchId?: string): void {
+  if (!branchId) return;
+  invalidateCache(getMenuCatalogCacheKey(branchId));
+  invalidateCache(getMenuAiCacheKey(branchId));
 }
 
-export async function applyMenuCatalog(items: MenuItem[], replaceAll = false) {
+export async function applyMenuCatalog(branchId: string, items: MenuItem[], replaceAll = false) {
   const sanitized = sanitizeMenuItems(items);
   if (sanitized.issues.length > 0) {
     const message = sanitized.issues.map((issue) => issue.message).join(" ");
@@ -182,22 +192,23 @@ export async function applyMenuCatalog(items: MenuItem[], replaceAll = false) {
   }
 
   const { error } = await supabaseAdmin.rpc("apply_menu_catalog", {
+    branch_uuid: branchId,
     menu_payload: sanitized.items,
     replace_all: replaceAll,
   });
   if (error) throw error;
 
-  invalidateMenuCache();
+  invalidateMenuCache(branchId);
 }
 
-export async function updateMenuFromExtraction(items: MenuItem[]) {
-  await applyMenuCatalog(items, true);
+export async function updateMenuFromExtraction(branchId: string, items: MenuItem[]) {
+  await applyMenuCatalog(branchId, items, true);
 }
 
-export async function createMenuUpload(imageUrl: string) {
+export async function createMenuUpload(branchId: string, imageUrl: string) {
   const { data, error } = await supabaseAdmin
     .from("menu_uploads")
-    .insert({ image_url: imageUrl, status: "pending" })
+    .insert({ branch_id: branchId, image_url: imageUrl, status: "pending" })
     .select()
     .single();
 

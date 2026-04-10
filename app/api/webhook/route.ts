@@ -1,10 +1,18 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextRequest } from "next/server";
 import { getCustomerSupportReply } from "@/lib/ai";
+import {
+  findBranchSelection,
+  getActiveBranches,
+  getBranchById,
+  getBranchSelectionPrompt,
+  isBranchChangeRequest,
+} from "@/lib/branches";
 import { OutboundMessageError, sendAndPersistOutboundMessage } from "@/lib/messages";
 import {
   decideTurn,
   getDefaultConversationState,
+  inferLanguagePreference,
   parseConversationState,
   type ConversationState,
   type PlaceableOrderPayload,
@@ -13,6 +21,7 @@ import {
 import { getMenuCatalog, getMenuForAI } from "@/lib/menu";
 import { getRestaurantSettings, isWithinOperatingHours } from "@/lib/settings";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { sendWhatsAppMessage } from "@/lib/whatsapp";
 
 type IncomingWhatsAppMessage = {
   id: string;
@@ -40,9 +49,18 @@ type IncomingMessageEvent = {
 
 type ConversationRow = {
   id: string;
+  branch_id: string;
+  contact_id: string;
   phone: string;
   name: string | null;
   mode: "agent" | "human";
+};
+
+type ContactRow = {
+  id: string;
+  phone: string;
+  name: string | null;
+  active_branch_id: string | null;
 };
 
 type MessageRow = {
@@ -92,11 +110,58 @@ async function processWebhook(body: unknown) {
   const events = extractIncomingMessages(body);
   if (events.length === 0) return;
 
+  const branches = await getActiveBranches();
   const agentConversations = new Map<string, ConversationRow>();
 
   for (const event of events) {
     const { message, contactName } = event;
-    const conversation = await upsertConversation(message.from, contactName);
+    const contact = await upsertContact(message.from, contactName);
+    const prefersRomanUrdu = inferLanguagePreference(message.text?.body ?? "", "english") === "roman_urdu";
+    const activeBranch = contact.active_branch_id
+      ? branches.find((branch) => branch.id === contact.active_branch_id) ?? null
+      : null;
+
+    if (!contact.active_branch_id || !activeBranch) {
+      if (contact.active_branch_id && !activeBranch) {
+        await setActiveBranch(contact.id, null);
+      }
+
+      if (message.type !== "text") {
+        if (message.type !== "reaction") {
+          await sendWhatsAppMessage(message.from, getBranchSelectionPrompt(branches, prefersRomanUrdu));
+        }
+        continue;
+      }
+
+      const selectedBranch = findBranchSelection(message.text?.body ?? "", branches);
+      if (!selectedBranch) {
+        await sendWhatsAppMessage(message.from, getBranchSelectionPrompt(branches, prefersRomanUrdu));
+        continue;
+      }
+
+      await setActiveBranch(contact.id, selectedBranch.id);
+      const selectedConversation = await upsertConversation(contact, selectedBranch.id, contactName);
+      const selectedState = await getOrCreateConversationState(selectedConversation.id);
+      const createdAt = toIsoTimestamp(message.timestamp);
+      const persistedMessage = await persistUserMessage(
+        selectedConversation.id,
+        (message.text?.body || "").trim(),
+        message.id,
+        createdAt,
+      );
+
+      await sendAndPersistAssistantMessage(
+        selectedConversation.id,
+        message.from,
+        prefersRomanUrdu
+          ? `Theek hai, *${selectedBranch.name}* select ho gayi. Address: ${selectedBranch.address}\n\nAb apna order bhej dein.`
+          : `Great, you've selected *${selectedBranch.name}*. Address: ${selectedBranch.address}\n\nSend your order whenever you're ready.`,
+      );
+      await markMessageProcessed(selectedState, message.id, createdAt, persistedMessage?.ingest_seq ?? null);
+      continue;
+    }
+
+    const conversation = await upsertConversation(contact, activeBranch.id, contactName);
     const state = await getOrCreateConversationState(conversation.id);
 
     if (message.type !== "text") {
@@ -116,6 +181,22 @@ async function processWebhook(body: unknown) {
     const content = (message.text?.body || "").trim();
     const createdAt = toIsoTimestamp(message.timestamp);
     const persistedMessage = await persistUserMessage(conversation.id, content, message.id, createdAt);
+
+    if (isBranchChangeRequest(content)) {
+      await updateConversationState(state, {
+        ...getDefaultConversationState(conversation.id),
+        workflow_step: "awaiting_branch_selection",
+        preferred_language: inferLanguagePreference(content, state.preferred_language),
+      });
+      await setActiveBranch(contact.id, null);
+      await sendAndPersistAssistantMessage(
+        conversation.id,
+        message.from,
+        getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
+      );
+      await markMessageProcessed(state, message.id, createdAt, persistedMessage?.ingest_seq ?? null);
+      continue;
+    }
 
     if (conversation.mode === "human") {
       await markMessageProcessed(state, message.id, createdAt, persistedMessage?.ingest_seq ?? null);
@@ -149,19 +230,55 @@ function extractIncomingMessages(body: unknown): IncomingMessageEvent[] {
   return events;
 }
 
-async function upsertConversation(phone: string, name: string): Promise<ConversationRow> {
+async function upsertContact(phone: string, name: string): Promise<ContactRow> {
   const { data, error } = await supabaseAdmin
-    .from("conversations")
+    .from("contacts")
     .upsert(
       {
         phone,
         name,
-        has_unread: true,
-        updated_at: new Date().toISOString(),
       },
       { onConflict: "phone" },
     )
-    .select("id, phone, name, mode")
+    .select("id, phone, name, active_branch_id")
+    .single();
+
+  if (error || !data) {
+    throw error ?? new Error("Failed to upsert contact.");
+  }
+
+  return data;
+}
+
+async function setActiveBranch(contactId: string, branchId: string | null) {
+  const { error } = await supabaseAdmin
+    .from("contacts")
+    .update({
+      active_branch_id: branchId,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", contactId);
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function upsertConversation(contact: ContactRow, branchId: string, name: string): Promise<ConversationRow> {
+  const { data, error } = await supabaseAdmin
+    .from("conversations")
+    .upsert(
+      {
+        contact_id: contact.id,
+        branch_id: branchId,
+        phone: contact.phone,
+        name,
+        has_unread: true,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "contact_id,branch_id" },
+    )
+    .select("id, contact_id, branch_id, phone, name, mode")
     .single();
 
   if (error || !data) {
@@ -264,10 +381,15 @@ async function drainConversationQueue(conversation: ConversationRow) {
   }
 
   try {
-    const settings = await getRestaurantSettings();
+    const branch = await getBranchById(conversation.branch_id);
+    if (!branch) {
+      throw new Error(`Missing branch ${conversation.branch_id} for conversation ${conversation.id}`);
+    }
+
+    const settings = await getRestaurantSettings(conversation.branch_id);
     const isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
-    const menuItems = await getMenuCatalog();
-    const menuForAI = await getMenuForAI();
+    const menuItems = await getMenuCatalog(conversation.branch_id);
+    const menuForAI = await getMenuForAI(conversation.branch_id);
 
     while (true) {
       const state = await getOrCreateConversationState(conversation.id);
@@ -300,13 +422,25 @@ async function drainConversationQueue(conversation: ConversationRow) {
             history.some((entry) => entry.role === "assistant"),
             settings,
             (decision.statePatch?.preferred_language ?? state.preferred_language) || "english",
+            {
+              id: branch.id,
+              slug: branch.slug,
+              name: branch.name,
+              address: branch.address,
+            },
           );
         } else {
           reply = decision.reply;
         }
 
         if (decision.kind === "place_order") {
-          await createOrderFromPayload(conversation.id, nextMessage.whatsapp_msg_id, decision.order, settings);
+          await createOrderFromPayload(
+            conversation.id,
+            conversation.branch_id,
+            nextMessage.whatsapp_msg_id,
+            decision.order,
+            settings,
+          );
         }
 
         await sendAndPersistAssistantMessage(conversation.id, conversation.phone, reply);
@@ -543,6 +677,7 @@ async function releaseConversationLock(conversationId: string, token: string) {
 
 async function createOrderFromPayload(
   conversationId: string,
+  branchId: string,
   sourceUserMessageId: string | null,
   payload: PlaceableOrderPayload,
   settings: Awaited<ReturnType<typeof getRestaurantSettings>>,
@@ -562,6 +697,7 @@ async function createOrderFromPayload(
   const { data: menuRows, error: menuError } = await supabaseAdmin
     .from("menu_items")
     .select("name, price, category")
+    .eq("branch_id", branchId)
     .eq("is_available", true);
 
   if (menuError) throw menuError;
@@ -589,6 +725,7 @@ async function createOrderFromPayload(
   const { data: order, error: orderError } = await supabaseAdmin
     .from("orders")
     .insert({
+      branch_id: branchId,
       conversation_id: conversationId,
       source_user_message_id: sourceUserMessageId,
       type: payload.type,

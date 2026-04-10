@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, Plus, Search, Trash2, UploadCloud } from "lucide-react";
 import { clsx } from "clsx";
+import { useDashboardContext } from "@/app/components/dashboard/DashboardProvider";
 
 interface MenuItem {
   id?: string;
@@ -99,6 +100,7 @@ async function deleteItem(id: string) {
 }
 
 export default function MenuPage() {
+  const { selectedBranchId, selectedBranch } = useDashboardContext();
   const [items, setItems] = useState<MenuItem[]>([]);
   const [importPreview, setImportPreview] = useState<MenuItem[]>([]);
   const [importWarnings, setImportWarnings] = useState<ImportWarning[]>([]);
@@ -118,9 +120,15 @@ export default function MenuPage() {
   }, []);
 
   const loadMenu = useCallback(async () => {
+    if (selectedBranchId === "all") {
+      setItems([]);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
-      const response = await fetch("/api/menu");
+      const response = await fetch(`/api/menu?branch_id=${encodeURIComponent(selectedBranchId)}`);
       if (!response.ok) throw new Error("Failed to load menu");
       setItems(await response.json());
     } catch {
@@ -128,7 +136,7 @@ export default function MenuPage() {
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [selectedBranchId, showToast]);
 
   useEffect(() => {
     void loadMenu();
@@ -216,9 +224,11 @@ export default function MenuPage() {
   };
 
   const handleSaveAll = async () => {
+    if (selectedBranchId === "all") return;
+
     setBulkSaving(true);
     try {
-      const response = await fetch("/api/menu", {
+      const response = await fetch(`/api/menu?branch_id=${encodeURIComponent(selectedBranchId)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -258,7 +268,11 @@ export default function MenuPage() {
       const reader = new FileReader();
       reader.onloadend = async () => {
         try {
-          const response = await fetch("/api/menu/process", {
+          if (selectedBranchId === "all") {
+            throw new Error("Please choose a single branch before uploading a menu.");
+          }
+
+          const response = await fetch(`/api/menu/process?branch_id=${encodeURIComponent(selectedBranchId)}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ imageUrl: reader.result as string }),
@@ -295,10 +309,20 @@ export default function MenuPage() {
 
   return (
     <div className="space-y-6 pb-10">
+      {selectedBranchId === "all" ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
+          Select a single branch from the sidebar to edit its menu.
+        </div>
+      ) : null}
+
       <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-slate-900">Menu Editor</h1>
-          <p className="text-sm text-slate-500">Uploads now create a reviewable preview first, and save mode controls whether we merge changes or replace the full catalog.</p>
+          <p className="text-sm text-slate-500">
+            {selectedBranch
+              ? `Editing menu for ${selectedBranch.name}. Uploads create a reviewable preview first.`
+              : "Uploads create a reviewable preview first, and save mode controls whether we merge changes or replace the full catalog."}
+          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -318,7 +342,7 @@ export default function MenuPage() {
             Add Row
           </button>
 
-          <button onClick={() => void handleSaveAll()} disabled={bulkSaving || items.length === 0} className="rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white shadow-sm shadow-orange-200 transition-colors hover:bg-brand-hover disabled:opacity-50">
+          <button onClick={() => void handleSaveAll()} disabled={selectedBranchId === "all" || bulkSaving || items.length === 0} className="rounded-xl bg-brand px-5 py-2.5 text-sm font-semibold text-white shadow-sm shadow-orange-200 transition-colors hover:bg-brand-hover disabled:opacity-50">
             {bulkSaving ? <Loader2 size={16} className="mr-2 inline animate-spin" /> : <CheckCircle2 size={16} className="mr-2 inline" />}
             {replaceExisting ? "Save Replacement" : "Apply Changes"}
           </button>

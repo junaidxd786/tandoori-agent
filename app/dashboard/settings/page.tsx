@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Clock, RefreshCw, Save, Store, Truck } from "lucide-react";
+import { Bot, Clock, Phone, RefreshCw, Save, Store, Truck } from "lucide-react";
 import { clsx } from "clsx";
+import { useDashboardContext } from "@/app/components/dashboard/DashboardProvider";
 import { toast } from "sonner";
 
 type SettingsState = {
@@ -12,6 +13,10 @@ type SettingsState = {
   delivery_enabled: boolean;
   delivery_fee: number;
   min_delivery_amount: number;
+  city: string;
+  phone_delivery: string;
+  phone_dine_in: string;
+  ai_personality: string;
 };
 
 function toTimeInputValue(value: string): string {
@@ -35,6 +40,7 @@ function toMeridiemLabel(value: string): string {
 }
 
 export default function SettingsPage() {
+  const { selectedBranchId, selectedBranch } = useDashboardContext();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [settings, setSettings] = useState<SettingsState>({
@@ -44,6 +50,10 @@ export default function SettingsPage() {
     delivery_enabled: false,
     delivery_fee: 0,
     min_delivery_amount: 0,
+    city: "",
+    phone_delivery: "",
+    phone_dine_in: "",
+    ai_personality: "",
   });
 
   useEffect(() => {
@@ -51,7 +61,12 @@ export default function SettingsPage() {
 
     async function loadSettings() {
       try {
-        const response = await fetch("/api/settings");
+        if (selectedBranchId === "all") {
+          setLoading(false);
+          return;
+        }
+
+        const response = await fetch(`/api/settings?branch_id=${encodeURIComponent(selectedBranchId)}`);
         const data = (await response.json()) as Partial<SettingsState>;
         if (!cancelled) {
           setSettings((current) => ({ ...current, ...data }));
@@ -71,12 +86,14 @@ export default function SettingsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [selectedBranchId]);
 
   async function save() {
+    if (selectedBranchId === "all") return;
+
     setSaving(true);
     try {
-      const response = await fetch("/api/settings", {
+      const response = await fetch(`/api/settings?branch_id=${encodeURIComponent(selectedBranchId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(settings),
@@ -104,14 +121,24 @@ export default function SettingsPage() {
 
   return (
     <div className="w-full flex flex-col gap-6 pb-8">
+      {selectedBranchId === "all" ? (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
+          Select a single branch from the sidebar to edit its settings.
+        </div>
+      ) : null}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Settings</h1>
-          <p className="text-sm text-slate-500 mt-1">These rules directly control whether the agent can accept and place orders.</p>
+          <p className="text-sm text-slate-500 mt-1">
+            {selectedBranch
+              ? `These rules apply to ${selectedBranch.name}.`
+              : "These rules directly control whether the agent can accept and place orders."}
+          </p>
         </div>
         <button
           onClick={save}
-          disabled={saving}
+          disabled={saving || selectedBranchId === "all"}
           className="flex items-center gap-2 bg-brand text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition hover:bg-brand-hover disabled:opacity-50 shadow-sm shadow-orange-200"
         >
           {saving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
@@ -218,6 +245,49 @@ export default function SettingsPage() {
             color="orange"
             text={`Delivery fee is Rs. ${settings.delivery_fee}. Minimum delivery is Rs. ${settings.min_delivery_amount}.`}
           />
+        </Card>
+
+        <Card icon={<Phone size={16} />} title="Contact & City">
+          <SettingRow label="City">
+            <input
+              type="text"
+              value={settings.city}
+              onChange={(event) => setSettings((current) => ({ ...current, city: event.target.value }))}
+              className="w-40 text-right text-sm font-semibold text-slate-800 bg-transparent outline-none"
+            />
+          </SettingRow>
+          <SettingRow label="Delivery Phone">
+            <input
+              type="text"
+              value={settings.phone_delivery}
+              onChange={(event) => setSettings((current) => ({ ...current, phone_delivery: event.target.value }))}
+              className="w-40 text-right text-sm font-semibold text-slate-800 bg-transparent outline-none"
+            />
+          </SettingRow>
+          <SettingRow label="Dine-in Phone">
+            <input
+              type="text"
+              value={settings.phone_dine_in}
+              onChange={(event) => setSettings((current) => ({ ...current, phone_dine_in: event.target.value }))}
+              className="w-40 text-right text-sm font-semibold text-slate-800 bg-transparent outline-none"
+            />
+          </SettingRow>
+        </Card>
+
+        <Card icon={<Bot size={16} />} title="AI Tone">
+          <div className="py-2.5">
+            <span className="text-sm text-slate-600 font-medium">AI Personality</span>
+            <textarea
+              value={settings.ai_personality}
+              onChange={(event) => setSettings((current) => ({ ...current, ai_personality: event.target.value }))}
+              rows={4}
+              className="mt-3 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-800 outline-none focus:border-brand/30 focus:ring-2 focus:ring-brand/10"
+              placeholder="Warm & Professional"
+            />
+            <p className="mt-2 text-xs text-slate-400">
+              This tone is injected into the WhatsApp assistant prompt for the selected branch.
+            </p>
+          </div>
         </Card>
       </div>
     </div>

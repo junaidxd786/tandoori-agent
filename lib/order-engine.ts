@@ -6,6 +6,7 @@ import {
 
 export type WorkflowStep =
   | "idle"
+  | "awaiting_branch_selection"
   | "collecting_items"
   | "awaiting_upsell_reply"
   | "awaiting_order_type"
@@ -540,7 +541,7 @@ export function decideTurn(context: TurnContext): TurnDecision {
 
       return {
         kind: "place_order",
-        reply: buildOrderPlacedReply(prefersRomanUrdu),
+        reply: buildOrderPlacedReply(context.settings, prefersRomanUrdu),
         statePatch: withPreferredLanguage(
           {
             ...resetDraftState(),
@@ -1230,6 +1231,13 @@ function inferPreferredLanguage(text: string, previous: LanguagePreference = "en
   }
 
   return previous;
+}
+
+export function inferLanguagePreference(
+  text: string,
+  previous: LanguagePreference = "english",
+): LanguagePreference {
+  return inferPreferredLanguage(text, previous);
 }
 
 function scoreSignals(text: string, signalWords: string[]): number {
@@ -1954,7 +1962,7 @@ function buildGreeting(prefersRomanUrdu: boolean): string {
 }
 
 function buildClosedReply(settings: RestaurantSettings, prefersRomanUrdu: boolean): string {
-  const phone = process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "our support line";
+  const phone = settings.phone_delivery || "our support line";
   return prefersRomanUrdu
     ? `Hum is waqt closed hain. Hamare hours ${settings.opening_time} se ${settings.closing_time} tak hain. Aap menu pooch sakte hain, lekin order place nahi ho sakta. Zarurat ho to call karein: ${phone}`
     : `We are currently closed. Our hours are ${settings.opening_time} to ${settings.closing_time}. I can still help with the menu, but I cannot place an order right now. For urgent help, call ${phone}.`;
@@ -1974,8 +1982,8 @@ function buildDeliveryMinimumNote(settings: RestaurantSettings, prefersRomanUrdu
     : `The minimum order for delivery is Rs. ${settings.min_delivery_amount}.`;
 }
 
-function buildOrderPlacedReply(prefersRomanUrdu: boolean): string {
-  const phone = process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "our support line";
+function buildOrderPlacedReply(settings: RestaurantSettings, prefersRomanUrdu: boolean): string {
+  const phone = settings.phone_delivery || "our support line";
   return prefersRomanUrdu
     ? `Your order has been placed successfully. Hum jaldi aap se rabta karenge. Queries ke liye call karein ${phone}`
     : `Your order has been placed successfully. We'll be with you shortly. For queries, call ${phone}`;

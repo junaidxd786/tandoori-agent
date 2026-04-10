@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireApiSession } from "@/lib/branch-request";
 import { persistSystemMessage, sendAndPersistOutboundMessage } from "@/lib/messages";
+import { canAccessConversation } from "@/lib/record-access";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
 type ConversationPatchBody = {
@@ -17,17 +19,29 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireApiSession();
+  if (auth.response || !auth.session) {
+    return auth.response ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
+  const accessibleConversation = await canAccessConversation(auth.session, id);
+  if (!accessibleConversation) {
+    return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+  }
+
   const { data, error } = await supabaseAdmin
     .from("conversations")
     .select(`
       id,
+      branch_id,
       phone,
       name,
       mode,
       has_unread,
       updated_at,
       created_at,
+      branches (id, name, slug, address),
       conversation_states (
         workflow_step,
         order_type,
@@ -38,7 +52,7 @@ export async function GET(
         last_error
       )
     `)
-    .eq("id", id)
+    .eq("id", accessibleConversation.id)
     .single();
 
   if (error || !data) {
@@ -53,7 +67,17 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireApiSession();
+  if (auth.response || !auth.session) {
+    return auth.response ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
+  const accessibleConversation = await canAccessConversation(auth.session, id);
+  if (!accessibleConversation) {
+    return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+  }
+
   const body = (await req.json()) as ConversationPatchBody;
   const { mode, has_unread } = body;
   let previousMode: "agent" | "human" | null = null;
@@ -66,7 +90,7 @@ export async function PATCH(
     const { data: existingConversation } = await supabaseAdmin
       .from("conversations")
       .select("mode")
-      .eq("id", id)
+      .eq("id", accessibleConversation.id)
       .maybeSingle();
     previousMode = existingConversation?.mode ?? null;
     updates.mode = mode;
@@ -83,7 +107,7 @@ export async function PATCH(
   const { data, error } = await supabaseAdmin
     .from("conversations")
     .update(updates)
-    .eq("id", id)
+    .eq("id", accessibleConversation.id)
     .select()
     .single();
 
@@ -92,7 +116,7 @@ export async function PATCH(
   }
 
   if (mode !== undefined && previousMode && previousMode !== mode) {
-    await persistSystemMessage(id, buildModeChangeNote(mode)).catch((persistError) => {
+    await persistSystemMessage(accessibleConversation.id, buildModeChangeNote(mode)).catch((persistError) => {
       console.error("[conversation PATCH] Failed to persist mode change note:", persistError);
     });
   }
@@ -105,7 +129,17 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireApiSession();
+  if (auth.response || !auth.session) {
+    return auth.response ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
+  const accessibleConversation = await canAccessConversation(auth.session, id);
+  if (!accessibleConversation) {
+    return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+  }
+
   const body = await req.json();
   const { message } = body;
 
@@ -117,7 +151,7 @@ export async function POST(
   const { data: conversation, error: convError } = await supabaseAdmin
     .from("conversations")
     .select("phone")
-    .eq("id", id)
+    .eq("id", accessibleConversation.id)
     .single();
 
   if (convError || !conversation) {
@@ -126,7 +160,7 @@ export async function POST(
 
   try {
     const sent = await sendAndPersistOutboundMessage({
-      conversationId: id,
+      conversationId: accessibleConversation.id,
       phone: conversation.phone,
       content: message.trim(),
       senderKind: "human",

@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireApiSession } from "@/lib/branch-request";
+import { canAccessOrder } from "@/lib/record-access";
 import { sendAndPersistOutboundMessage } from "@/lib/messages";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
@@ -45,7 +47,17 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireApiSession();
+  if (auth.response || !auth.session) {
+    return auth.response ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { id } = await params;
+  const accessibleOrder = await canAccessOrder(auth.session, id);
+  if (!accessibleOrder) {
+    return NextResponse.json({ error: "Order not found" }, { status: 404 });
+  }
+
   const body = (await req.json()) as StatusPatchBody;
   const { status } = body;
   const assignedTo = normalizeAssignee(body.assigned_to);
@@ -61,7 +73,7 @@ export async function PATCH(
   const { data: existingOrder, error: existingError } = await supabaseAdmin
     .from("orders")
     .select(`status, type, conversation_id, assigned_to, conversations (phone, name)`)
-    .eq("id", id)
+    .eq("id", accessibleOrder.id)
     .single();
 
   if (existingError || !existingOrder) {
@@ -85,7 +97,7 @@ export async function PATCH(
   const { data: order, error } = await supabaseAdmin
     .from("orders")
     .update(updates)
-    .eq("id", id)
+    .eq("id", accessibleOrder.id)
     .select(`*, conversations (phone, name)`)
     .single();
 
@@ -115,7 +127,7 @@ export async function PATCH(
             status_notification_status: "sent",
             status_notification_error: null,
           })
-          .eq("id", id);
+          .eq("id", accessibleOrder.id);
       } catch (notifyError) {
         await supabaseAdmin
           .from("orders")
@@ -123,7 +135,7 @@ export async function PATCH(
             status_notification_status: "failed",
             status_notification_error: notifyError instanceof Error ? notifyError.message : "Unknown notification error",
           })
-          .eq("id", id);
+          .eq("id", accessibleOrder.id);
       }
     } else {
       await supabaseAdmin
@@ -132,7 +144,7 @@ export async function PATCH(
           status_notification_status: "skipped",
           status_notification_error: "Customer phone was unavailable for notification.",
         })
-        .eq("id", id);
+        .eq("id", accessibleOrder.id);
     }
   }
 

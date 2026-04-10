@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, Clock, MapPin, Package, Phone, RefreshCw, Search, ShoppingBag, Truck, UserRound } from "lucide-react";
 import { clsx } from "clsx";
 import { format, formatDistanceToNow } from "date-fns";
-import { supabase } from "@/lib/supabase";
+import { useDashboardContext } from "@/app/components/dashboard/DashboardProvider";
 import { toast } from "sonner";
 
 type OrderStatus = "received" | "preparing" | "out_for_delivery" | "delivered" | "cancelled";
@@ -19,6 +19,7 @@ interface OrderItem {
 
 interface Order {
   id: string;
+  branch_id: string;
   order_number: number;
   type: "delivery" | "dine-in";
   status: OrderStatus;
@@ -33,6 +34,7 @@ interface Order {
   status_notification_error: string | null;
   created_at: string;
   order_items: OrderItem[];
+  branches: { name: string; slug: string } | null;
   conversations: { phone: string; name: string | null } | null;
 }
 
@@ -58,6 +60,7 @@ function getStatusOptions(current: OrderStatus) {
 }
 
 export default function OrdersPage() {
+  const { selectedBranchId, selectedBranch } = useDashboardContext();
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<FilterTab>("active");
@@ -69,7 +72,8 @@ export default function OrdersPage() {
   const loadOrders = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await fetch("/api/orders?limit=100", { headers: { "ngrok-skip-browser-warning": "69420" } });
+      const branchQuery = selectedBranchId === "all" ? "" : `&branch_id=${encodeURIComponent(selectedBranchId)}`;
+      const response = await fetch(`/api/orders?limit=100${branchQuery}`, { headers: { "ngrok-skip-browser-warning": "69420" } });
       if (!response.ok) throw new Error("Failed to load orders");
       const data = (await response.json()) as Order[];
       setOrders(data);
@@ -80,20 +84,16 @@ export default function OrdersPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedBranchId]);
 
   useEffect(() => {
     void loadOrders();
   }, [loadOrders]);
 
   useEffect(() => {
-    const channel = supabase
-      .channel("orders-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => void loadOrders())
-      .subscribe();
-
+    const interval = window.setInterval(() => void loadOrders(), 12000);
     return () => {
-      supabase.removeChannel(channel);
+      window.clearInterval(interval);
     };
   }, [loadOrders]);
 
@@ -168,7 +168,11 @@ export default function OrdersPage() {
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-slate-900">Order Queue</h1>
-          <p className="text-sm text-slate-500">Realtime kitchen dashboard with assignment, notification, and SLA visibility.</p>
+          <p className="text-sm text-slate-500">
+            {selectedBranch
+              ? `Showing orders for ${selectedBranch.name}.`
+              : "Showing combined orders across all branches."}
+          </p>
         </div>
         <button onClick={() => void loadOrders()} disabled={loading} className="flex h-10 items-center justify-center rounded-xl bg-brand px-5 text-sm font-semibold text-white shadow-sm shadow-orange-200 transition-colors hover:bg-brand-hover disabled:opacity-50">
           <RefreshCw size={14} className={clsx("mr-2", loading && "animate-spin")} />
@@ -238,6 +242,7 @@ export default function OrdersPage() {
                       <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-500">
                         <span className="inline-flex items-center gap-1.5"><Clock size={13} /> {formatDistanceToNow(new Date(order.created_at), { addSuffix: true })}</span>
                         <span className="inline-flex items-center gap-1.5 capitalize">{order.type === "delivery" ? <Truck size={13} /> : <Package size={13} />}{order.type.replace("-", " ")}</span>
+                        {order.branches?.name && <span className="inline-flex items-center gap-1.5">{order.branches.name}</span>}
                         {order.address && <span className="inline-flex max-w-xs items-center gap-1.5 truncate"><MapPin size={13} /> <span className="truncate">{order.address}</span></span>}
                         <span className="inline-flex items-center gap-1.5"><UserRound size={13} /> {order.assigned_to ?? "Unassigned"}</span>
                       </div>

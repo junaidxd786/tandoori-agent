@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { resolveRequestBranch } from "@/lib/branch-request";
 import { applyMenuCatalog, sanitizeMenuItems } from "@/lib/menu";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
@@ -14,10 +15,16 @@ type MenuPutBody = {
   replaceAll?: boolean;
 };
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const auth = await resolveRequestBranch(req, { requireBranch: true });
+  if (auth.response || !auth.branchId) {
+    return auth.response ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const { data, error } = await supabaseAdmin
     .from("menu_items")
     .select("*")
+    .eq("branch_id", auth.branchId)
     .order("category", { ascending: true })
     .order("name", { ascending: true });
 
@@ -30,6 +37,11 @@ export async function GET() {
 
 export async function PUT(req: NextRequest) {
   try {
+    const auth = await resolveRequestBranch(req, { requireBranch: true });
+    if (auth.response || !auth.branchId) {
+      return auth.response ?? NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = (await req.json()) as MenuPutBody | IncomingMenuItem[];
     const replaceAll = !Array.isArray(body) && body.replaceAll === true;
     const items = Array.isArray(body) ? body : body.items ?? [];
@@ -49,9 +61,10 @@ export async function PUT(req: NextRequest) {
       );
     }
 
-    await applyMenuCatalog(sanitized.items, replaceAll);
+    await applyMenuCatalog(auth.branchId, sanitized.items, replaceAll);
     return NextResponse.json({
       success: true,
+      branch_id: auth.branchId,
       replaceAll,
       applied: sanitized.items.length,
     });

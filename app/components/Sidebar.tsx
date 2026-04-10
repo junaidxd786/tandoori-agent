@@ -10,23 +10,33 @@ import {
   LayoutDashboard,
   UtensilsCrossed,
   Settings,
+  LogOut,
+  ShieldCheck,
+  Users,
 } from "lucide-react";
 import { clsx } from "clsx";
-import { supabase } from "@/lib/supabase";
+import { useDashboardContext } from "@/app/components/dashboard/DashboardProvider";
 
-const navItems = [
+const baseNavItems = [
   { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
   { href: "/dashboard/conversations", label: "Conversations", icon: MessageSquare },
   { href: "/dashboard/orders", label: "Orders", icon: ShoppingBag },
   { href: "/dashboard/menu", label: "Menu Editor", icon: UtensilsCrossed },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
+const adminNavItems = [...baseNavItems, { href: "/dashboard/admin", label: "Admin", icon: Users }];
+
+function buildBranchQuery(branchId: string | "all") {
+  return branchId === "all" ? "" : `&branch_id=${encodeURIComponent(branchId)}`;
+}
 
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
+  const { session, selectedBranchId, selectedBranch, setSelectedBranchId, logout } = useDashboardContext();
   const appName = process.env.NEXT_PUBLIC_APP_NAME || "Tandoori Hub";
   const [firstWord, ...rest] = appName.split(" ");
+  const navItems = session.role === "admin" ? adminNavItems : baseNavItems;
 
   const [globalUnreadCount, setGlobalUnreadCount] = useState(0);
   const notifiedSetRef = useRef<Set<string>>(new Set());
@@ -61,12 +71,12 @@ export function Sidebar() {
     navItems.forEach((item) => {
       router.prefetch(item.href);
     });
-  }, [router]);
+  }, [navItems, router]);
 
   useEffect(() => {
     const checkNotifications = async () => {
       try {
-        const res = await fetch("/api/conversations?limit=100", {
+        const res = await fetch(`/api/conversations?limit=100${buildBranchQuery(selectedBranchId)}`, {
           cache: "no-store",
           headers: { "ngrok-skip-browser-warning": "69420" }
         });
@@ -105,17 +115,12 @@ export function Sidebar() {
     };
 
     void checkNotifications();
-
-    const channel = supabase
-      .channel("sidebar-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "conversations" }, () => void checkNotifications())
-      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => void checkNotifications())
-      .subscribe();
+    const interval = window.setInterval(() => void checkNotifications(), 12000);
 
     return () => {
-      supabase.removeChannel(channel);
+      window.clearInterval(interval);
     };
-  }, []);
+  }, [selectedBranchId]);
 
   return (
     // Dark mode sidebar
@@ -140,6 +145,29 @@ export function Sidebar() {
             </p>
           </div>
         </Link>
+      </div>
+
+      <div className="px-4 pt-4">
+        <label className="block rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3">
+          <span className="mb-2 block text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">
+            Active Branch
+          </span>
+          <select
+            value={selectedBranchId}
+            onChange={(event) => setSelectedBranchId(event.target.value as string | "all")}
+            className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-100 outline-none focus:border-brand"
+          >
+            {session.role === "admin" ? <option value="all">All branches</option> : null}
+            {session.allowedBranches.map((branch) => (
+              <option key={branch.id} value={branch.id}>
+                {branch.name}
+              </option>
+            ))}
+          </select>
+          <p className="mt-2 text-xs text-zinc-500">
+            {selectedBranch ? selectedBranch.address : "Admin overview across all branches"}
+          </p>
+        </label>
       </div>
 
       <nav className="flex-1 px-4 py-6 space-y-1.5">
@@ -187,6 +215,32 @@ export function Sidebar() {
           );
         })}
       </nav>
+
+      <div className="border-t border-zinc-800/70 p-4">
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-800 text-zinc-300">
+              <ShieldCheck size={18} />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-white">
+                {session.fullName || session.email || "Staff User"}
+              </p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-500">
+                {session.role === "admin" ? "Admin" : "Branch Staff"}
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={() => void logout()}
+            className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-200 transition hover:border-zinc-700 hover:bg-zinc-900"
+          >
+            <LogOut size={15} />
+            Sign Out
+          </button>
+        </div>
+      </div>
     </aside>
   );
 }
