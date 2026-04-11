@@ -239,7 +239,8 @@ export async function applyMenuCatalog(branchId: string, items: MenuItem[], repl
   }
 
   invalidateMenuCache(branchId);
-  await syncMenuEmbeddingsForBranch(branchId).catch((error) => {
+  // Fire-and-forget: sync embeddings asynchronously without blocking menu updates
+  syncMenuEmbeddingsForBranch(branchId).catch((error) => {
     console.error("[menu] Failed to sync semantic embeddings:", error);
   });
 }

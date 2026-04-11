@@ -9,7 +9,7 @@ import {
   isBranchChangeRequest,
   type BranchSummary,
 } from "@/lib/branches";
-import { escalateToHuman } from "@/lib/handoff";
+import { escalateToHuman, resumeBotForConversation } from "@/lib/handoff";
 import {
   OutboundMessageError,
   sendAndPersistOutboundFlowMessage,
@@ -21,6 +21,7 @@ import {
   getDefaultConversationState,
   inferLanguagePreference,
   parseConversationState,
+  detectMessageType,
   type MenuCatalogItem,
   type TurnDecision,
   type ConversationState,
@@ -49,6 +50,20 @@ import {
   sendWhatsAppMessage,
   type WhatsAppInteractiveFlowPayload,
 } from "@/lib/whatsapp";
+
+function shouldResumeBotFromHumanMessage(content: string): boolean {
+  const normalized = content.toLowerCase().trim();
+  return (
+    normalized.includes("resume bot") ||
+    normalized.includes("back to bot") ||
+    normalized.includes("switch to bot") ||
+    normalized.includes("bot resume") ||
+    normalized.includes("ai handle") ||
+    normalized.includes("let ai handle") ||
+    normalized.includes("transfer to ai") ||
+    normalized.includes("bot can handle")
+  );
+}
 
 type IncomingWhatsAppMessage = {
   id: string;
@@ -649,6 +664,27 @@ async function drainConversationQueue(conversation: ConversationRow) {
       );
       if (!nextMessage) break;
 
+      // Check if we should resume bot mode from human handoff
+      if (conversation.mode === "human" && shouldResumeBotFromHumanMessage(nextMessage.content)) {
+        await resumeBotForConversation(conversation.id);
+        await supabaseAdmin
+          .from("conversations")
+          .update({
+            mode: "bot",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", conversation.id);
+        // Skip processing this message as it's a control command
+        await updateConversationState(state, {
+          last_processed_user_message_id: nextMessage.whatsapp_msg_id,
+          last_processed_message_seq: nextMessage.ingest_seq,
+          last_processed_user_message_at: nextMessage.created_at,
+          last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
+          last_error: null,
+        });
+        continue;
+      }
+
       if (isStaleMessage(nextMessage, state)) {
         await updateConversationState(state, {
           last_processed_message_seq: nextMessage.ingest_seq,
@@ -659,15 +695,23 @@ async function drainConversationQueue(conversation: ConversationRow) {
 
       const settings = await getRestaurantSettings(conversation.branch_id);
       const isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
-      const menuItems = await getMenuCatalog(conversation.branch_id);
-      const menuForAI = await getMenuForAI(conversation.branch_id);
+
+      // Detect message type for optimization
+      const messageType = detectMessageType(nextMessage.content.toLowerCase().trim());
+
+      // Only load expensive resources for complex/menu messages
+      const needsFullProcessing = messageType === "complex" || messageType === "menu_related";
+      const menuItems = needsFullProcessing ? await getMenuCatalog(conversation.branch_id) : [];
+      const menuForAI = needsFullProcessing ? await getMenuForAI(conversation.branch_id) : null;
+      const semanticMatches = needsFullProcessing ? await getSemanticMenuMatches(conversation.branch_id, nextMessage.content, 5) : [];
+
       const recentOrder = await getRecentOrderContext(conversation.id);
       const session = await getOrCreateUserSession(conversation.id, {
         active_node: conversation.mode === "human" ? "human_handoff" : "cart_builder",
         status: conversation.mode === "human" ? "human_handoff" : "active",
         is_bot_active: conversation.mode !== "human",
       });
-      const semanticMatches = await getSemanticMenuMatches(conversation.branch_id, nextMessage.content, 5);
+
       const decision = await decideTurn({
         messageText: nextMessage.content,
         state,
@@ -743,10 +787,12 @@ async function drainConversationQueue(conversation: ConversationRow) {
         }
 
         if (decision.kind === "fallback") {
+          // For fallback, we need conversation history and menu data
           const history = await getConversationHistoryUpTo(conversation.id, nextMessage.ingest_seq);
+          const fallbackMenuForAI = menuForAI || await getMenuForAI(conversation.branch_id);
           reply = await getCustomerSupportReply(
             history,
-            menuForAI,
+            fallbackMenuForAI,
             isOpenNow,
             history.some((entry) => entry.role === "assistant"),
             settings,

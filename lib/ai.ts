@@ -10,6 +10,25 @@ const client = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY || "dummy_key_to_prevent_build_crash",
 });
 
+// Simple in-memory cache for AI interpretations
+const interpretationCache = new Map<string, { result: OrderTurnInterpretation; expires: number }>();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes for simple intents (increased from 5)
+const COMPLEX_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes for complex intents
+
+function getCacheKey(input: OrderTurnInterpretationInput): string {
+  // Create a cache key based on message text and workflow step
+  return `${input.messageText.toLowerCase().trim()}_${input.workflowStep}`;
+}
+
+function isSimpleIntent(intent: OrderTurnIntent): boolean {
+  return ["confirm_order", "continue_order", "greeting", "chitchat", "unknown", "restart_order", "cancel_order"].includes(intent);
+}
+
+function isCacheableIntent(intent: OrderTurnIntent): boolean {
+  // Cache more intents aggressively
+  return ["confirm_order", "continue_order", "greeting", "chitchat", "unknown", "restart_order", "cancel_order", "browse_menu", "category_question"].includes(intent);
+}
+
 export type OrderTurnIntent =
   | "greeting"
   | "add_items"
@@ -316,6 +335,12 @@ async function repairOrderInterpretation(
 export async function getOrderTurnInterpretation(
   input: OrderTurnInterpretationInput,
 ): Promise<OrderTurnInterpretation> {
+  const cacheKey = getCacheKey(input);
+  const cached = interpretationCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) {
+    return cached.result;
+  }
+
   try {
     const completion = await client.chat.completions.create({
       model: process.env.ORDER_AGENT_NLU_MODEL || "openrouter/auto",
@@ -345,6 +370,14 @@ export async function getOrderTurnInterpretation(
 
     const parsed = OrderTurnInterpretationSchema.safeParse(parsedObject);
     if (parsed.success) {
+      // Cache based on intent type
+      if (isCacheableIntent(parsed.data.intent)) {
+        const ttl = isSimpleIntent(parsed.data.intent) ? CACHE_TTL_MS : COMPLEX_CACHE_TTL_MS;
+        interpretationCache.set(cacheKey, {
+          result: parsed.data,
+          expires: Date.now() + ttl,
+        });
+      }
       return parsed.data;
     }
 
@@ -354,21 +387,45 @@ export async function getOrderTurnInterpretation(
     });
 
     if (repaired) {
+      // Cache repaired results too
+      if (isCacheableIntent(repaired.intent)) {
+        const ttl = isSimpleIntent(repaired.intent) ? CACHE_TTL_MS : COMPLEX_CACHE_TTL_MS;
+        interpretationCache.set(cacheKey, {
+          result: repaired,
+          expires: Date.now() + ttl,
+        });
+      }
       return repaired;
     }
 
     console.error("[ai] NLU validation failed:", validationErrorText(parsed.error));
-    return {
+    const fallbackResult = {
       ...DEFAULT_INTERPRETATION,
       language: input.preferredLanguage,
       notes: `Validation failed: ${validationErrorText(parsed.error)}`,
     };
+    // Cache fallback for unknown intents
+    if (isCacheableIntent(fallbackResult.intent)) {
+      interpretationCache.set(cacheKey, {
+        result: fallbackResult,
+        expires: Date.now() + CACHE_TTL_MS,
+      });
+    }
+    return fallbackResult;
   } catch (error) {
     console.error("[ai] NLU parser failed:", error);
-    return {
+    const errorResult = {
       ...DEFAULT_INTERPRETATION,
       language: input.preferredLanguage,
     };
+    // Cache error fallback for unknown intents
+    if (isCacheableIntent(errorResult.intent)) {
+      interpretationCache.set(cacheKey, {
+        result: errorResult,
+        expires: Date.now() + CACHE_TTL_MS,
+      });
+    }
+    return errorResult;
   }
 }
 
