@@ -212,14 +212,14 @@ export async function updateUserSession(
   patch: Partial<UserSession>,
 ): Promise<UserSession> {
   const nextPatch = {
+    conversation_id: conversationId,
     ...patch,
     updated_at: new Date().toISOString(),
   };
 
   const { data, error } = await supabaseAdmin
     .from("user_sessions")
-    .update(nextPatch)
-    .eq("conversation_id", conversationId)
+    .upsert(nextPatch, { onConflict: "conversation_id" })
     .select("*")
     .single();
 

@@ -53,9 +53,27 @@ function normalizeText(value: string): string {
     .trim();
 }
 
+function normalizeCompact(value: string): string {
+  return normalizeText(value).replace(/\s+/g, "");
+}
+
 function overlapScore(query: string, candidate: string): number {
-  const left = new Set(normalizeText(query).split(" ").filter(Boolean));
-  const right = new Set(normalizeText(candidate).split(" ").filter(Boolean));
+  const normalizedQuery = normalizeText(query);
+  const normalizedCandidate = normalizeText(candidate);
+  const compactQuery = normalizeCompact(query);
+  const compactCandidate = normalizeCompact(candidate);
+
+  if (compactQuery && compactCandidate) {
+    if (compactQuery === compactCandidate) return 0.95;
+    if (compactQuery.length >= 5 && compactCandidate.length >= 5) {
+      if (compactQuery.includes(compactCandidate) || compactCandidate.includes(compactQuery)) {
+        return 0.75;
+      }
+    }
+  }
+
+  const left = new Set(normalizedQuery.split(" ").filter(Boolean));
+  const right = new Set(normalizedCandidate.split(" ").filter(Boolean));
   if (left.size === 0 || right.size === 0) return 0;
 
   let intersection = 0;

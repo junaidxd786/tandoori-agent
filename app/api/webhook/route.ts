@@ -26,13 +26,12 @@ import {
   type TurnDecision,
   type ConversationState,
   type PlaceableOrderPayload,
-  type RecentOrderContext,
 } from "@/lib/order-engine";
 import { getMenuCatalog, getMenuForAI } from "@/lib/menu";
 import { getSemanticMenuMatches } from "@/lib/semantic-menu";
 import { getRestaurantSettings, isWithinOperatingHours } from "@/lib/settings";
 import { supabaseAdmin } from "@/lib/supabase-admin";
-import { buildSessionUpdate, getOrCreateUserSession, updateUserSession } from "@/lib/user-session";
+import { buildSessionUpdate, getDefaultUserSession, getOrCreateUserSession, updateUserSession } from "@/lib/user-session";
 import {
   buildWhatsAppFlowPayload,
   extractFlowResponseCommand,
@@ -701,24 +700,23 @@ async function drainConversationQueue(conversation: ConversationRow) {
 
       // Only load expensive resources for complex/menu messages
       const needsFullProcessing = messageType === "complex" || messageType === "menu_related";
+      const shouldHydrateSession = !(messageType === "greeting" || messageType === "acknowledgment");
       const [
         menuItems,
-        menuForAI,
         semanticMatches,
-        recentOrder,
         session,
       ] = await Promise.all([
         needsFullProcessing ? getMenuCatalog(conversation.branch_id) : Promise.resolve([]),
-        needsFullProcessing ? getMenuForAI(conversation.branch_id) : Promise.resolve(null),
         messageType === "complex"
           ? getSemanticMenuMatches(conversation.branch_id, nextMessage.content, 5)
           : Promise.resolve([]),
-        getRecentOrderContext(conversation.id),
-        getOrCreateUserSession(conversation.id, {
-          active_node: conversation.mode === "human" ? "human_handoff" : "cart_builder",
-          status: conversation.mode === "human" ? "human_handoff" : "active",
-          is_bot_active: conversation.mode !== "human",
-        }),
+        shouldHydrateSession
+          ? getOrCreateUserSession(conversation.id, {
+              active_node: conversation.mode === "human" ? "human_handoff" : "cart_builder",
+              status: conversation.mode === "human" ? "human_handoff" : "active",
+              is_bot_active: conversation.mode !== "human",
+            })
+          : Promise.resolve(getDefaultUserSession(conversation.id)),
       ]);
 
       const decision = await decideTurn({
@@ -733,7 +731,7 @@ async function drainConversationQueue(conversation: ConversationRow) {
         },
         settings,
         isOpenNow,
-        recentOrder,
+        recentOrder: null,
         session,
       });
 
@@ -803,7 +801,7 @@ async function drainConversationQueue(conversation: ConversationRow) {
         if (decision.kind === "fallback") {
           // For fallback, we need conversation history and menu data
           const history = await getConversationHistoryUpTo(conversation.id, nextMessage.ingest_seq);
-          const fallbackMenuForAI = menuForAI || await getMenuForAI(conversation.branch_id);
+          const fallbackMenuForAI = await getMenuForAI(conversation.branch_id);
           reply = await getCustomerSupportReply(
             history,
             fallbackMenuForAI,
@@ -885,25 +883,27 @@ async function drainConversationQueue(conversation: ConversationRow) {
           last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
           last_error: null,
         });
-        await updateUserSession(
-          conversation.id,
-          buildSessionUpdate({
-            session,
-            stateBefore: state,
-            stateAfter: nextStateSnapshot,
-            mode: conversation.mode,
-            intent: (decision.trace?.intent as OrderTurnIntent | undefined) ?? null,
-            lastUserMessage: nextMessage.content,
-            lastAssistantReply: reply,
-            semanticCandidates: semanticMatches.map((item) => ({
-              id: item.id,
-              name: item.name,
-              price: item.price,
-              category: item.category,
-              similarity: item.similarity,
-            })),
-          }),
-        );
+        if (shouldHydrateSession) {
+          await updateUserSession(
+            conversation.id,
+            buildSessionUpdate({
+              session,
+              stateBefore: state,
+              stateAfter: nextStateSnapshot,
+              mode: conversation.mode,
+              intent: (decision.trace?.intent as OrderTurnIntent | undefined) ?? null,
+              lastUserMessage: nextMessage.content,
+              lastAssistantReply: reply,
+              semanticCandidates: semanticMatches.map((item) => ({
+                id: item.id,
+                name: item.name,
+                price: item.price,
+                category: item.category,
+                similarity: item.similarity,
+              })),
+            }),
+          );
+        }
         await recordOrderAgentTurn({
           conversationId: conversation.id,
           messageId: nextMessage.id,
@@ -1085,26 +1085,6 @@ async function getConversationHistoryUpTo(conversationId: string, ingestSeq: num
     role: row.role,
     content: row.content,
   }));
-}
-
-async function getRecentOrderContext(conversationId: string): Promise<RecentOrderContext | null> {
-  const { data, error } = await supabaseAdmin
-    .from("orders")
-    .select("order_number, status, type, created_at")
-    .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) throw error;
-  if (!data) return null;
-
-  return {
-    order_number: data.order_number,
-    status: data.status,
-    type: data.type,
-    created_at: data.created_at,
-  };
 }
 
 async function sendAndPersistAssistantMessage(

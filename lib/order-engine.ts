@@ -44,11 +44,6 @@ export function detectMessageType(normalizedText: string): MessageType {
   return "complex";
 }
 
-function isSimpleMessage(normalizedText: string): boolean {
-  const type = detectMessageType(normalizedText);
-  return type === "greeting" || type === "acknowledgment";
-}
-
 export async function getRecentOrderContext(conversationId: string): Promise<RecentOrderContext | null> {
   const { data, error } = await supabaseAdmin
     .from("orders")
@@ -450,7 +445,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
 
   // EARLY EXIT FOR STATUS REQUESTS
   if (messageType === "status_request") {
-    const recentOrder = await getRecentOrderContext(context.state.conversation_id);
+    const recentOrder = context.recentOrder ?? await getRecentOrderContext(context.state.conversation_id);
     if (recentOrder) {
       const statusMessage = getOrderStatusMessage(recentOrder, prefersRomanUrdu);
       return replyDecision(statusMessage, withPreferredLanguage({}, preferredLanguage));
@@ -516,6 +511,80 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
           },
           preferredLanguage,
         ),
+      );
+    }
+  }
+
+  // FAST CHECKOUT SHORTCUTS: avoid NLU call for explicit structured replies.
+  if (state.workflow_step === "awaiting_confirmation" && isExplicitYes(normalizedText)) {
+    const validation = validateDraftForPlacement(state, context.settings);
+    if (validation.ok === false) {
+      return replyDecision(
+        validation.reply(prefersRomanUrdu),
+        withPreferredLanguage(validation.statePatch, preferredLanguage),
+      );
+    }
+
+    return {
+      kind: "place_order",
+      reply: buildOrderPlacedReply(context.settings, prefersRomanUrdu),
+      statePatch: withPreferredLanguage(
+        {
+          ...resetDraftState(),
+          summary_sent_at: new Date().toISOString(),
+        },
+        preferredLanguage,
+      ),
+      order: validation.order,
+      trace: {
+        intent: "confirm_order",
+        confidence: 0.99,
+        unknownItems: [],
+        sentiment: "neutral",
+        notes: null,
+      },
+    };
+  }
+
+  if (state.workflow_step === "awaiting_order_type") {
+    const quickOrderType = parseOrderTypeShortcut(normalizedText);
+    if (quickOrderType) {
+      return handleOrderTypeSelection(
+        context,
+        state,
+        preferredLanguage,
+        quickOrderType,
+        {
+          intent: "set_order_type",
+          confidence: 0.97,
+          unknownItems: [],
+          sentiment: "neutral",
+          notes: null,
+        },
+      );
+    }
+  }
+
+  if (state.workflow_step === "awaiting_delivery_address") {
+    const quickAddress = parseAddress(rawText);
+    if (quickAddress) {
+      return buildSummaryReply(
+        {
+          state: {
+            ...state,
+            preferred_language: preferredLanguage,
+            address: quickAddress,
+            order_type: "delivery",
+          },
+          settings: context.settings,
+        },
+        {
+          intent: "provide_address",
+          confidence: 0.95,
+          unknownItems: [],
+          sentiment: "neutral",
+          notes: null,
+        },
       );
     }
   }
@@ -611,9 +680,10 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   if ((interpretation.asks_status || interpretation.intent === "order_status_question") && state.cart.length === 0) {
-    if (context.recentOrder) {
+    const recentOrder = context.recentOrder ?? await getRecentOrderContext(context.state.conversation_id);
+    if (recentOrder) {
       return replyDecision(
-        buildOrderStatusReply(context.recentOrder, prefersRomanUrdu),
+        buildOrderStatusReply(recentOrder, prefersRomanUrdu),
         withPreferredLanguage({}, preferredLanguage),
         trace,
       );
