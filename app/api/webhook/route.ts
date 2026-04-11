@@ -208,13 +208,17 @@ async function processWebhook(body: unknown) {
       }
 
       await setActiveBranch(contact.id, selectedBranch.id);
+      // Update local contact object so subsequent logic uses the correct branch
+      contact.active_branch_id = selectedBranch.id;
+
       const selectedConversation = await upsertConversation(contact, selectedBranch.id, contactName);
       const selectedState = await getOrCreateConversationState(selectedConversation.id);
+      
+      const createdAt = toIsoTimestamp(message.timestamp);
       if (selectedState.last_processed_user_message_id === message.id) {
         continue;
       }
 
-      const createdAt = toIsoTimestamp(message.timestamp);
       const persistedMessage = await persistUserMessage(
         selectedConversation.id,
         incomingContent,
@@ -222,19 +226,24 @@ async function processWebhook(body: unknown) {
         createdAt,
       );
 
+      const assistantReply = prefersRomanUrdu
+        ? `Theek hai, *${selectedBranch.name}* select ho gayi. Address: ${selectedBranch.address}\n\nAb apna order bhej dein.`
+        : `Great, you've selected *${selectedBranch.name}*. Address: ${selectedBranch.address}\n\nSend your order whenever you're ready.`;
+
       await sendAndPersistAssistantMessage(
         selectedConversation.id,
         message.from,
-        prefersRomanUrdu
-          ? `Theek hai, *${selectedBranch.name}* select ho gayi. Address: ${selectedBranch.address}\n\nAb apna order bhej dein.`
-          : `Great, you've selected *${selectedBranch.name}*. Address: ${selectedBranch.address}\n\nSend your order whenever you're ready.`,
+        assistantReply,
       );
+      
       await markMessageProcessed(selectedState, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
+      
       const selectedSession = await getOrCreateUserSession(selectedConversation.id, {
         active_node: "cart_builder",
         status: "active",
         is_bot_active: true,
       });
+
       await updateUserSession(
         selectedConversation.id,
         buildSessionUpdate({
@@ -244,15 +253,14 @@ async function processWebhook(body: unknown) {
           mode: "agent",
           intent: null,
           lastUserMessage: incomingContent,
-          lastAssistantReply: prefersRomanUrdu
-            ? `Theek hai, *${selectedBranch.name}* select ho gayi. Address: ${selectedBranch.address}\n\nAb apna order bhej dein.`
-            : `Great, you've selected *${selectedBranch.name}*. Address: ${selectedBranch.address}\n\nSend your order whenever you're ready.`,
+          lastAssistantReply: assistantReply,
         }),
       );
       continue;
     }
 
-    const conversation = await upsertConversation(contact, activeBranch.id, contactName);
+    // Normal processing if branch is already active
+    const conversation = await upsertConversation(contact, contact.active_branch_id, contactName);
     const state = await getOrCreateConversationState(conversation.id);
     if (state.last_processed_user_message_id === message.id) {
       continue;
@@ -394,20 +402,43 @@ function extractIncomingContent(message: IncomingWhatsAppMessage): string | null
 }
 
 async function upsertContact(phone: string, name: string): Promise<ContactRow> {
+  const { data: existing, error: fetchError } = await supabaseAdmin
+    .from("contacts")
+    .select("id, phone, name, active_branch_id")
+    .eq("phone", phone)
+    .maybeSingle();
+
+  if (fetchError) {
+    console.error("[webhook] Error fetching contact:", fetchError);
+  }
+
+  if (existing) {
+    // If name has changed, update it. Otherwise keep the existing record (and its active_branch_id)
+    if (existing.name !== name) {
+      const { data: updated, error: updateError } = await supabaseAdmin
+        .from("contacts")
+        .update({ name, updated_at: new Date().toISOString() })
+        .eq("id", existing.id)
+        .select("id, phone, name, active_branch_id")
+        .single();
+      
+      if (updateError) {
+        console.error("[webhook] Error updating contact name:", updateError);
+        return existing;
+      }
+      return updated;
+    }
+    return existing;
+  }
+
   const { data, error } = await supabaseAdmin
     .from("contacts")
-    .upsert(
-      {
-        phone,
-        name,
-      },
-      { onConflict: "phone" },
-    )
+    .insert({ phone, name })
     .select("id, phone, name, active_branch_id")
     .single();
 
   if (error || !data) {
-    throw error ?? new Error("Failed to upsert contact.");
+    throw error ?? new Error("Failed to insert contact.");
   }
 
   return data;
