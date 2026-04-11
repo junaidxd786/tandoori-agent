@@ -1,4 +1,7 @@
+import { getCached, invalidateCache, setCached } from "./cache";
 import { supabaseAdmin } from "./supabase-admin";
+
+const SETTINGS_CACHE_TTL_MS = 15 * 60 * 1000;
 
 export interface RestaurantSettings {
   branch_id: string;
@@ -235,6 +238,10 @@ export function validateRestaurantSettingsInput(settings: Partial<RestaurantSett
 }
 
 export async function getRestaurantSettings(branchId: string): Promise<RestaurantSettings> {
+  const cacheKey = `settings:${branchId}`;
+  const cached = getCached<RestaurantSettings>(cacheKey);
+  if (cached) return cached;
+
   const { data, error } = await supabaseAdmin
     .from("restaurant_settings")
     .select("*")
@@ -249,7 +256,7 @@ export async function getRestaurantSettings(branchId: string): Promise<Restauran
     };
   }
 
-  return {
+  const result: RestaurantSettings = {
     branch_id: data.branch_id,
     is_accepting_orders: data.is_accepting_orders,
     opening_time: data.opening_time,
@@ -262,6 +269,9 @@ export async function getRestaurantSettings(branchId: string): Promise<Restauran
     phone_dine_in: data.phone_dine_in ?? DEFAULT_SETTINGS.phone_dine_in,
     ai_personality: data.ai_personality ?? DEFAULT_SETTINGS.ai_personality,
   };
+
+  setCached(cacheKey, result, SETTINGS_CACHE_TTL_MS);
+  return result;
 }
 
 export async function updateRestaurantSettings(branchId: string, settings: Partial<RestaurantSettings>) {
@@ -290,6 +300,8 @@ export async function updateRestaurantSettings(branchId: string, settings: Parti
     console.error("[updateRestaurantSettings] Failed:", error);
     throw new Error("Failed to update settings");
   }
+
+  invalidateCache(`settings:${branchId}`);
 }
 
 export function isWithinOperatingHours(openingTime: string, closingTime: string): boolean {

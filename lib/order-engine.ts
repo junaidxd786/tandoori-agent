@@ -1253,10 +1253,15 @@ function handleLogisticsAndFallback(params: {
         };
       }
 
+      const isRetrying = context.session.invalid_step_count > 0;
       return replyDecision(
         prefersRomanUrdu
-          ? "Please apna poora delivery address bhej dein."
-          : "Please send your full delivery address.",
+          ? isRetrying
+            ? "Mujhe address samajh nahi aaya. Please apna mukammal (full) delivery address clearly type karein. Agar masla ho to 'human' type karein."
+            : "Please apna poora delivery address bhej dein."
+          : isRetrying
+            ? "I couldn't quite understand the address. Could you please type your full delivery address clearly? If you're stuck, type 'human'."
+            : "Please send your full delivery address.",
         withPreferredLanguage({ workflow_step: "awaiting_delivery_address" }, preferredLanguage),
         trace,
       );
@@ -1305,10 +1310,15 @@ function handleLogisticsAndFallback(params: {
         };
       }
 
+      const isRetrying = context.session.invalid_step_count > 0;
       return replyDecision(
         prefersRomanUrdu
-          ? "Kitne guests honge aur kis time aana hai? Misal: *4 guests at 8 PM*."
-          : "How many guests and what time? Example: *4 guests at 8 PM*.",
+          ? isRetrying
+            ? "Mujhe details samajh nahi aayin. Please clearly batayein: Kitne guests honge aur kis time aana hai? Misal: *4 guests at 8 PM*."
+            : "Kitne guests honge aur kis time aana hai? Misal: *4 guests at 8 PM*."
+          : isRetrying
+            ? "I didn't catch the details. Please clearly state how many guests and what time? Example: *4 guests at 8 PM*."
+            : "How many guests and what time? Example: *4 guests at 8 PM*.",
         withPreferredLanguage(
           {
             workflow_step: "awaiting_dine_in_details",
@@ -2465,6 +2475,17 @@ function resolveRequestedItems(
       continue;
     }
 
+    if (requested.length > 0) {
+      const disambiguationCandidates = findDisambiguationCandidatesFromRaw(rawText, request.name, menuItems);
+      if (disambiguationCandidates.length > 0) {
+        ambiguous.push({
+          query: request.name,
+          options: disambiguationCandidates,
+        });
+        continue;
+      }
+    }
+
     const normalizedRequest = normalizeText(request.name);
     if (!normalizedRequest) continue;
 
@@ -2511,7 +2532,8 @@ function resolveRequestedItems(
 
     const [best] = candidates;
     const second = candidates[1];
-    if (best.score >= 0.8 && (!second || best.score - second.score >= 0.12)) {
+    const similarityThreshold = 0.7; // Explicit threshold for semantic/lexical match
+    if (best.score >= similarityThreshold && (!second || best.score - second.score >= 0.12)) {
       matched.push({
         name: best.item.name,
         price: best.item.price,
@@ -2532,6 +2554,48 @@ function resolveRequestedItems(
     unknown: [...new Set(unknown)].slice(0, 5),
     ambiguous,
   };
+}
+
+function findDisambiguationCandidatesFromRaw(
+  rawText: string,
+  requestName: string,
+  menuItems: MenuCatalogItem[],
+): MenuCatalogItem[] {
+  const normalizedRaw = normalizeText(rawText);
+  const normalizedRequest = normalizeText(requestName);
+  if (!normalizedRaw || !normalizedRequest) return [];
+  if (isLikelySelectionCommand(normalizedRaw)) return [];
+  if (extractAnyQuantity(normalizedRaw) != null) return [];
+
+  const rawTokens = normalizedRaw.split(/\s+/).filter(Boolean);
+  const requestTokens = normalizedRequest.split(/\s+/).filter(Boolean);
+  const hasQualifierNotInRaw = requestTokens.some(
+    (token) => token.length >= 4 && !rawTokens.includes(token),
+  );
+
+  const rankedByRaw = menuItems
+    .map((item) => ({
+      item,
+      score: itemSimilarityScore(normalizedRaw, normalizeText(item.name)),
+    }))
+    .filter((entry) => entry.score >= 0.45)
+    .sort((left, right) => right.score - left.score);
+
+  if (rankedByRaw.length < 2) return [];
+
+  const best = rankedByRaw[0];
+  const second = rankedByRaw[1];
+  const exactTypedMatch = normalizeText(best.item.name) === normalizedRaw;
+  if (exactTypedMatch && !hasQualifierNotInRaw) return [];
+
+  const broadText = rawTokens.length <= 3;
+  const weakLead = best.score < 0.82;
+  const closeAlternatives = Boolean(second && best.score - second.score < 0.12);
+  const shouldDisambiguate = hasQualifierNotInRaw || broadText || weakLead || closeAlternatives;
+
+  if (!shouldDisambiguate) return [];
+
+  return rankedByRaw.slice(0, 3).map((entry) => entry.item);
 }
 
 function findInlineItems(rawText: string, menuItems: MenuCatalogItem[]): Array<{ name: string; qty: number }> {

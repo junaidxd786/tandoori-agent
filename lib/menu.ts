@@ -35,7 +35,7 @@ export type MenuCatalogItem = {
   is_available: boolean;
 };
 
-const MENU_CACHE_TTL_MS = 30 * 1000;
+const MENU_CACHE_TTL_MS = 15 * 60 * 1000;
 
 function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();

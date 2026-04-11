@@ -10,6 +10,7 @@ const client = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY || "dummy_key_to_prevent_build_crash",
 });
 
+
 // Simple in-memory cache for AI interpretations
 const interpretationCache = new Map<string, { result: OrderTurnInterpretation; expires: number }>();
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes for simple intents (increased from 5)
@@ -49,7 +50,39 @@ export type OrderTurnIntent =
   | "chitchat"
   | "unknown";
 
+export interface ParsedTurnItem {
+  name: string;
+  qty: number;
+}
 
+export interface ParsedTurnRemoval {
+  name: string;
+  qty: number | "all";
+}
+
+export interface OrderTurnInterpretation {
+  intent: OrderTurnIntent;
+  confidence: number;
+  language: LanguagePreference;
+  add_items: ParsedTurnItem[];
+  remove_items: ParsedTurnRemoval[];
+  unknown_items: string[];
+  order_type: OrderType | null;
+  address: string | null;
+  guests: number | null;
+  reservation_time: string | null;
+  category_query: string | null;
+  asks_menu: boolean;
+  asks_payment: boolean;
+  asks_eta: boolean;
+  asks_status: boolean;
+  wants_confirmation: boolean | null;
+  wants_restart: boolean;
+  wants_continue: boolean;
+  wants_human: boolean;
+  sentiment: "calm" | "neutral" | "frustrated" | "angry";
+  notes: string | null;
+}
 
 export interface OrderTurnInterpretationInput {
   messageText: string;
@@ -115,10 +148,6 @@ const OrderTurnInterpretationSchema = z.object({
   sentiment: z.enum(["calm", "neutral", "frustrated", "angry"]),
   notes: z.string().trim().min(1).max(400).nullable(),
 }).strict();
-
-export type ParsedTurnItem = z.infer<typeof ParsedTurnItemSchema>;
-export type ParsedTurnRemoval = z.infer<typeof ParsedTurnRemovalSchema>;
-export type OrderTurnInterpretation = z.infer<typeof OrderTurnInterpretationSchema>;
 
 const DEFAULT_INTERPRETATION: OrderTurnInterpretation = {
   intent: "unknown",
