@@ -396,11 +396,12 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   const prefersRomanUrdu = preferredLanguage === "roman_urdu";
   const state = context.state;
   const messageType = detectMessageType(normalizedText);
+  const isWorkflowGateStep = expectsStructuredCheckoutInput(state.workflow_step);
 
   if (normalizedText.length === 0) {
     return replyDecision(
       prefersRomanUrdu
-        ? "Text message bhej dein aur main order mein madad kar deta hoon."
+        ? "Baraye meharbani text message bhejain takay main order place karne mein aapki madad kar sakun."
         : "Please send a text message and I will help with your order.",
       withPreferredLanguage({}, preferredLanguage),
     );
@@ -409,36 +410,17 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   // ULTRA-FAST PATTERN-BASED EARLY EXIT FOR SIMPLE GREETINGS - No AI call, no DB queries
   if (isSimpleGreetingPattern(rawText) && state.cart.length === 0 && state.workflow_step === "idle") {
     return replyDecision(
-      prefersRomanUrdu
-        ? "Assalam o Alaikum! Aap order dena chahen to item ka naam bhej dein."
-        : "Hello! Send any item name and I can start your order.",
+      getGreetingReply(rawText, prefersRomanUrdu),
       withPreferredLanguage({}, preferredLanguage),
     );
   }
 
   // ULTRA-FAST PATTERN-BASED EARLY EXIT FOR SIMPLE ACKNOWLEDGMENTS
-  if (isSimpleAcknowledgmentPattern(rawText)) {
-    if (state.workflow_step === "awaiting_upsell_reply") {
-      return replyDecision(
-        prefersRomanUrdu
-          ? "Theek hai, aur kuch order dena hai?"
-          : "Got it! Would you like to add anything else?",
-        withPreferredLanguage(
-          {
-            workflow_step: "collecting_items",
-            upsell_item_name: null,
-            upsell_item_price: null,
-            upsell_offered: true,
-          },
-          preferredLanguage,
-        ),
-      );
-    }
-
+  if (isSimpleAcknowledgmentPattern(rawText) && !isWorkflowGateStep) {
     return replyDecision(
       prefersRomanUrdu
-        ? "Theek hai, bataiye main kya kar sakta hoon aap ke liye?"
-        : "Alright, let me know how I can help you!",
+        ? "Ji theek hai, batayein main aapki mazeed kya madad kar sakta hoon?"
+        : "Alright, let me know how else I can help you!",
       withPreferredLanguage({}, preferredLanguage),
     );
   }
@@ -446,32 +428,13 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   // EARLY EXIT FOR DETECTED GREETINGS (fallback to AI-detected greetings)
   if (messageType === "greeting" && state.cart.length === 0 && state.workflow_step === "idle") {
     return replyDecision(
-      prefersRomanUrdu
-        ? "Assalam o Alaikum! Aap order dena chahen to item ka naam bhej dein."
-        : "Hello! Send any item name and I can start your order.",
+      getGreetingReply(rawText, prefersRomanUrdu),
       withPreferredLanguage({}, preferredLanguage),
     );
   }
 
   // EARLY EXIT FOR DETECTED ACKNOWLEDGMENTS
-  if (messageType === "acknowledgment") {
-    if (state.workflow_step === "awaiting_upsell_reply") {
-      return replyDecision(
-        prefersRomanUrdu
-          ? "Theek hai, aur kuch order dena hai?"
-          : "Got it! Would you like to add anything else?",
-        withPreferredLanguage(
-          {
-            workflow_step: "collecting_items",
-            upsell_item_name: null,
-            upsell_item_price: null,
-            upsell_offered: true,
-          },
-          preferredLanguage,
-        ),
-      );
-    }
-
+  if (messageType === "acknowledgment" && !isWorkflowGateStep) {
     return replyDecision(
       prefersRomanUrdu
         ? "Theek hai, bataiye main kya kar sakta hoon aap ke liye?"
@@ -574,6 +537,13 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     sentiment: interpretation.sentiment,
     notes: interpretation.notes,
   };
+
+  const quickOrderType = parseOrderTypeShortcut(normalizedText);
+  if (quickOrderType) {
+    interpretation.order_type = quickOrderType;
+    interpretation.intent = "set_order_type";
+    interpretation.confidence = Math.max(interpretation.confidence, 0.92);
+  }
 
   if (containsAny(normalizedText, RESTART_WORDS)) {
     interpretation.wants_restart = true;
@@ -703,6 +673,25 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     interpretation.intent === "browse_menu" ||
     isLikelyMenuRequest(normalizedText)
   ) {
+    const queryHints = buildMenuQueryHints(rawText, normalizedText);
+    if (queryHints.length > 0) {
+      const matchedMenuItems = pickMenuSuggestionsForQuery(queryHints[0], menuItems, context.semanticMatches, 8);
+      if (matchedMenuItems.length > 0) {
+        return replyDecision(
+          buildItemMatchesReply(queryHints[0], matchedMenuItems, prefersRomanUrdu),
+          withPreferredLanguage(
+            {
+              workflow_step: "collecting_items",
+              last_presented_options: matchedMenuItems,
+              last_presented_options_at: new Date().toISOString(),
+            },
+            preferredLanguage,
+          ),
+          trace,
+        );
+      }
+    }
+
     const categoryReply = buildCategoryListReply(menuItems, prefersRomanUrdu);
     return replyDecision(
       categoryReply.text,
@@ -762,9 +751,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
 
   if (interpretation.intent === "greeting" && state.cart.length === 0 && state.workflow_step === "idle") {
     return replyDecision(
-      prefersRomanUrdu
-        ? "Assalam o Alaikum! Aap order dena chahen to item ka naam bhej dein."
-        : "Hello! Send any item name and I can start your order.",
+      getGreetingReply(rawText, prefersRomanUrdu),
       withPreferredLanguage({}, preferredLanguage),
       trace,
     );
@@ -1108,9 +1095,7 @@ function handleLogisticsAndFallback(params: {
           prefersRomanUrdu
             ? `Theek hai, ${upsellItem.name} add kar diya.`
             : `Great, I added ${upsellItem.name}.`,
-          prefersRomanUrdu
-            ? "Ab order type batayein: *Delivery* ya *Dine-in*."
-            : "Now choose order type: *Delivery* or *Dine-in*.",
+          buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu),
         ].join("\n\n"),
         withPreferredLanguage(
           {
@@ -1122,6 +1107,7 @@ function handleLogisticsAndFallback(params: {
           preferredLanguage,
         ),
         trace,
+        buildOrderTypeInteractiveList(prefersRomanUrdu, context.settings.delivery_enabled),
       );
     }
 
@@ -1132,8 +1118,8 @@ function handleLogisticsAndFallback(params: {
 
       return replyDecision(
         prefersRomanUrdu
-          ? "Theek hai, upsell skip kar diya. Ab order type batayein: *Delivery* ya *Dine-in*."
-          : "No problem, skipped. Now choose order type: *Delivery* or *Dine-in*.",
+          ? `Theek hai, upsell skip kar diya. ${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)}`
+          : `No problem, skipped. ${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)}`,
         withPreferredLanguage(
           {
             workflow_step: "awaiting_order_type",
@@ -1144,6 +1130,7 @@ function handleLogisticsAndFallback(params: {
           preferredLanguage,
         ),
         trace,
+        buildOrderTypeInteractiveList(prefersRomanUrdu, context.settings.delivery_enabled),
       );
     }
 
@@ -1167,6 +1154,11 @@ function handleLogisticsAndFallback(params: {
   }
 
   if (state.workflow_step === "awaiting_order_type") {
+    const quickOrderType = parseOrderTypeShortcut(normalizedText);
+    if (quickOrderType) {
+      return handleOrderTypeSelection(context, state, preferredLanguage, quickOrderType, trace);
+    }
+
     const generalQtyOverride = inferGeneralQtyOverride(normalizedText, state);
     if (generalQtyOverride) {
       const updatedCart = applyQtyOverride(state.cart, generalQtyOverride.name, generalQtyOverride.qty);
@@ -1177,9 +1169,7 @@ function handleLogisticsAndFallback(params: {
             : `Done, quantity updated: ${generalQtyOverride.name} x${generalQtyOverride.qty}.`,
           !context.isOpenNow
             ? buildClosedReply(context.settings, prefersRomanUrdu, true)
-            : prefersRomanUrdu
-              ? "Order type batayein: *Delivery* ya *Dine-in*."
-              : "Please choose order type: *Delivery* or *Dine-in*.",
+            : buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu),
         ].join("\n\n"),
         withPreferredLanguage(
           {
@@ -1202,9 +1192,7 @@ function handleLogisticsAndFallback(params: {
             : `Done, quantity updated: ${updatedCart[updatedCart.length - 1].name} x${lastItemOverrideQty}.`,
           !context.isOpenNow
             ? buildClosedReply(context.settings, prefersRomanUrdu, true)
-            : prefersRomanUrdu
-              ? "Order type batayein: *Delivery* ya *Dine-in*."
-              : "Please choose order type: *Delivery* or *Dine-in*.",
+            : buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu),
         ].join("\n\n"),
         withPreferredLanguage(
           {
@@ -1231,10 +1219,11 @@ function handleLogisticsAndFallback(params: {
 
     return replyDecision(
       prefersRomanUrdu
-        ? "Order type batayein: *Delivery* ya *Dine-in*. Agar quantity ya item remove karna ho to bhi likh dein."
-        : "Please choose order type: *Delivery* or *Dine-in*. You can also ask to remove items or change quantity.",
+        ? `${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)} Agar quantity ya item remove karna ho to bhi likh dein.`
+        : `${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)} You can also ask to remove items or change quantity.`,
       withPreferredLanguage({ workflow_step: "awaiting_order_type" }, preferredLanguage),
       trace,
+      buildOrderTypeInteractiveList(prefersRomanUrdu, context.settings.delivery_enabled),
     );
   }
 
@@ -1354,10 +1343,11 @@ function handleLogisticsAndFallback(params: {
 
     return replyDecision(
       prefersRomanUrdu
-        ? "Order type batayein: *Delivery* ya *Dine-in*. Agar quantity ya item remove karna ho to bhi likh dein."
-        : "Please choose order type: *Delivery* or *Dine-in*. You can also ask to remove items or change quantity.",
+        ? `${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)} Agar quantity ya item remove karna ho to bhi likh dein.`
+        : `${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)} You can also ask to remove items or change quantity.`,
       withPreferredLanguage({ workflow_step: "awaiting_order_type" }, preferredLanguage),
       trace,
+      buildOrderTypeInteractiveList(prefersRomanUrdu, context.settings.delivery_enabled),
     );
   }
 
@@ -1428,6 +1418,74 @@ function normalizeText(value: string): string {
 
 function normalizeCompact(value: string): string {
   return normalizeText(value).replace(/\s+/g, "");
+}
+
+function expectsStructuredCheckoutInput(step: WorkflowStep): boolean {
+  return (
+    step === "awaiting_upsell_reply" ||
+    step === "awaiting_order_type" ||
+    step === "awaiting_delivery_address" ||
+    step === "awaiting_dine_in_details" ||
+    step === "awaiting_confirmation"
+  );
+}
+
+function parseOrderTypeShortcut(normalizedText: string): OrderType | null {
+  if (
+    /^(delivery|order type delivery|order_type_delivery|type delivery|delivery please|delivery kar do)$/.test(
+      normalizedText,
+    )
+  ) {
+    return "delivery";
+  }
+
+  if (
+    /^(dine in|dine-in|dinein|order type dine in|order_type_dine_in|type dine in|dine in please)$/.test(
+      normalizedText,
+    )
+  ) {
+    return "dine-in";
+  }
+
+  return null;
+}
+
+function buildMenuQueryHints(rawText: string, normalizedText: string): string[] {
+  if (isGenericMenuPrompt(normalizedText)) {
+    return [];
+  }
+
+  const hints = [extractItemAvailabilityQuery(normalizedText), rawText.trim()].filter(
+    (value): value is string => Boolean(value && value.trim()),
+  );
+  return [...new Set(hints)];
+}
+
+function isGenericMenuPrompt(normalizedText: string): boolean {
+  return /^(menu|show menu|show me menu|browse menu|categories|category list|menu categories)$/.test(normalizedText);
+}
+
+function pickMenuSuggestionsForQuery(
+  query: string,
+  menuItems: MenuCatalogItem[],
+  semanticMatches: SemanticMenuMatch[],
+  limit = 8,
+): MenuCatalogItem[] {
+  const semanticCandidates = semanticMatches
+    .filter((item) => (item.similarity ?? 0) >= 0.58)
+    .slice(0, limit)
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      price: Number(item.price),
+      category: item.category ?? null,
+      is_available: item.is_available ?? true,
+    }));
+  if (semanticCandidates.length > 0) {
+    return semanticCandidates;
+  }
+
+  return findLikelyMenuSuggestions(query, menuItems, limit).filter((item) => itemSimilarityScore(normalizeText(query), normalizeText(item.name)) >= 0.5);
 }
 
 function scoreSignals(text: string, words: string[]): number {
@@ -1809,7 +1867,7 @@ function maybeAppendCheckoutPrompt(reply: string, state: ConversationState, roma
   if (state.cart.length === 0) return reply;
 
   if (state.order_type == null) {
-    const prompt = romanUrdu ? "Order type batayein: Delivery ya Dine-in." : "Please choose order type: Delivery or Dine-in.";
+    const prompt = buildOrderTypePrompt(true, romanUrdu);
     return `${reply}\n\n${prompt}`;
   }
 
@@ -1824,6 +1882,18 @@ function maybeAppendCheckoutPrompt(reply: string, state: ConversationState, roma
   }
 
   return reply;
+}
+
+function buildOrderTypePrompt(deliveryEnabled: boolean, romanUrdu: boolean): string {
+  if (!deliveryEnabled) {
+    return romanUrdu
+      ? "Order type batayein: *Dine-in*."
+      : "Please choose order type: *Dine-in*.";
+  }
+
+  return romanUrdu
+    ? "Order type batayein: *Delivery* ya *Dine-in*."
+    : "Please choose order type: *Delivery* or *Dine-in*.";
 }
 
 function formatCartItems(cart: DraftCartItem[]): string {
@@ -1925,11 +1995,23 @@ function buildUnknownItemReplyData(
 }
 
 function isUpsellYes(normalizedText: string): boolean {
-  return normalizedText === "upsell_yes" || hasPhrase(normalizedText, "add it") || isExplicitYes(normalizedText);
+  return (
+    normalizedText === "upsell_yes" ||
+    normalizedText === "upsell yes" ||
+    normalizedText === "upsell-yes" ||
+    hasPhrase(normalizedText, "add it") ||
+    isExplicitYes(normalizedText)
+  );
 }
 
 function isUpsellNo(normalizedText: string): boolean {
-  return normalizedText === "upsell_no" || hasPhrase(normalizedText, "skip") || isExplicitNo(normalizedText);
+  return (
+    normalizedText === "upsell_no" ||
+    normalizedText === "upsell no" ||
+    normalizedText === "upsell-no" ||
+    hasPhrase(normalizedText, "skip") ||
+    isExplicitNo(normalizedText)
+  );
 }
 
 function buildUpsellInteractiveList(romanUrdu: boolean, itemName?: string, itemPrice?: number): {
@@ -1956,6 +2038,45 @@ function buildUpsellInteractiveList(romanUrdu: boolean, itemName?: string, itemP
         title: romanUrdu ? "Nahi, Skip" : "No, Skip",
       },
     ],
+  };
+}
+
+function buildOrderTypeInteractiveList(
+  romanUrdu: boolean,
+  deliveryEnabled: boolean,
+): {
+  body: string;
+  buttonText: string;
+  sectionTitle?: string;
+  rows: Array<{ id: string; title: string; description?: string }>;
+} | null {
+  const rows: Array<{ id: string; title: string; description?: string }> = [];
+
+  if (deliveryEnabled) {
+    rows.push({
+      id: "order_type_delivery",
+      title: romanUrdu ? "Delivery" : "Delivery",
+      description: romanUrdu ? "Address par bhejna hai" : "Send to my address",
+    });
+  }
+
+  rows.push({
+    id: "order_type_dine_in",
+    title: romanUrdu ? "Dine-in" : "Dine-in",
+    description: romanUrdu ? "Restaurant mein khaana hai" : "I will eat at restaurant",
+  });
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  return {
+    body: romanUrdu
+      ? "Apna order type select karein."
+      : "Please choose your order type.",
+    buttonText: romanUrdu ? "Choose Type" : "Choose Type",
+    sectionTitle: romanUrdu ? "Order Type" : "Order Type",
+    rows,
   };
 }
 
@@ -2178,8 +2299,8 @@ function buildLogisticsOrSummaryReply(
   if (params.state.order_type == null) {
     parts.push(
       romanUrdu
-        ? "Order type batayein: *Delivery* ya *Dine-in*. Agar quantity ya item remove karna ho to bhi likh dein."
-        : "Please choose order type: *Delivery* or *Dine-in*. You can also ask to remove items or change quantity.",
+        ? `${buildOrderTypePrompt(params.settings.delivery_enabled, romanUrdu)} Agar quantity ya item remove karna ho to bhi likh dein.`
+        : `${buildOrderTypePrompt(params.settings.delivery_enabled, romanUrdu)} You can also ask to remove items or change quantity.`,
     );
     return replyDecision(
       parts.join("\n\n"),
@@ -2191,6 +2312,7 @@ function buildLogisticsOrSummaryReply(
         params.state.preferred_language,
       ),
       trace,
+      buildOrderTypeInteractiveList(romanUrdu, params.settings.delivery_enabled),
     );
   }
 
@@ -2250,8 +2372,11 @@ function buildPersistedStatePatch(state: ConversationState): Partial<Conversatio
     upsell_item_price: state.upsell_item_price,
     upsell_offered: state.upsell_offered,
     declined_upsells: state.declined_upsells,
+    last_presented_category: state.last_presented_category,
+    last_presented_at: state.last_presented_at,
     last_presented_options: state.last_presented_options,
     last_presented_options_at: state.last_presented_options_at,
+    resume_workflow_step: state.resume_workflow_step,
     summary_sent_at: state.summary_sent_at,
   };
 }
@@ -3222,6 +3347,21 @@ function parseReservationTime(text: string, settings?: { opening_time: string; c
   }
 
   return buildRestaurantDateTimeIso(year, month, day, hours, minutes);
+}
+
+function getGreetingReply(rawText: string, romanUrdu: boolean): string {
+  const text = rawText.toLowerCase();
+  const isSalam = /\b(assalam|aoa|salam)\b/.test(text);
+
+  if (romanUrdu) {
+    return isSalam
+      ? "Walaikum Assalam! Aapko kya order karna hai? Item ka naam bhej dein."
+      : "Hello! Aapko kya order karna hai? Item ka naam bhej dein.";
+  } else {
+    return isSalam
+      ? "Walaikum Assalam! What would you like to order? Send any item name."
+      : "Hello! What would you like to order? Send any item name.";
+  }
 }
 
 function isSimpleGreetingPattern(text: string): boolean {
