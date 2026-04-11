@@ -592,6 +592,49 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     );
   }
 
+  if (
+    state.last_presented_options &&
+    state.last_presented_options.length > 0 &&
+    !isLikelySelectionCommand(normalizedText) &&
+    !findPresentedOptionByDirectValue(rawText, state.last_presented_options) &&
+    isSearchLikeDisambiguationMessage(normalizedText)
+  ) {
+    const suggestions = findLikelyMenuSuggestions(rawText, menuItems, 6);
+    if (suggestions.length > 0) {
+      return replyDecision(
+        buildAmbiguousItemReply(rawText, suggestions, prefersRomanUrdu),
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_options: suggestions,
+            last_presented_options_at: new Date().toISOString(),
+          },
+          preferredLanguage,
+        ),
+        trace,
+      );
+    }
+  }
+
+  const availabilityQuery = extractItemAvailabilityQuery(normalizedText);
+  if (availabilityQuery) {
+    const itemSuggestions = findLikelyMenuSuggestions(availabilityQuery, menuItems, 8);
+    if (itemSuggestions.length > 0) {
+      return replyDecision(
+        buildItemMatchesReply(availabilityQuery, itemSuggestions, prefersRomanUrdu),
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_options: itemSuggestions,
+            last_presented_options_at: new Date().toISOString(),
+          },
+          preferredLanguage,
+        ),
+        trace,
+      );
+    }
+  }
+
   const matchedAdds = resolveRequestedItems(
     interpretation.add_items,
     interpretation.unknown_items,
@@ -814,6 +857,31 @@ function handleLogisticsAndFallback(params: {
   const state = context.state;
   const prefersRomanUrdu = preferredLanguage === "roman_urdu";
   const normalizedText = normalizeText(context.messageText);
+
+  if (
+    (state.workflow_step === "awaiting_order_type" ||
+      state.workflow_step === "awaiting_delivery_address" ||
+      state.workflow_step === "awaiting_dine_in_details" ||
+      state.workflow_step === "awaiting_confirmation") &&
+    state.cart.length === 0
+  ) {
+    return replyDecision(
+      prefersRomanUrdu
+        ? "Cart empty hai. Please pehle item add karein."
+        : "Your cart is empty. Please add an item first.",
+      withPreferredLanguage(
+        {
+          workflow_step: "collecting_items",
+          order_type: null,
+          address: null,
+          guests: null,
+          reservation_time: null,
+        },
+        preferredLanguage,
+      ),
+      trace,
+    );
+  }
 
   if (state.workflow_step === "awaiting_upsell_reply") {
     const isYesReply = isUpsellYes(normalizedText);
@@ -1152,6 +1220,27 @@ function isExplicitNo(text: string): boolean {
 
 function isLikelyMenuRequest(text: string): boolean {
   return /(menu|show.*menu|what.*have|list.*items|kya.*hai|dikhao)/.test(text);
+}
+
+function isSearchLikeDisambiguationMessage(normalizedText: string): boolean {
+  if (!normalizedText || normalizedText.length < 3) return false;
+  if (extractAnyQuantity(normalizedText) != null) return false;
+  if (/(delivery|dine in|dinein|confirm|yes|no|cancel|remove|qty|quantity)/.test(normalizedText)) return false;
+  if (/(add|kar do|kr do|chahiye|order)/.test(normalizedText)) return false;
+  return true;
+}
+
+function extractItemAvailabilityQuery(normalizedText: string): string | null {
+  const cleaned = normalizedText.replace(/\s+/g, " ").trim();
+  if (!cleaned) return null;
+
+  const match = cleaned.match(/^(.+?)\s+(hai|available|milta|milti|milta hai|milti hai)\??$/);
+  if (!match) return null;
+
+  const query = match[1].trim();
+  if (!query || query.length < 3) return null;
+  if (/(menu|category|categories|delivery|dine in|dinein)/.test(query)) return null;
+  return query;
 }
 
 function isLikelyQuantityOnlyInstruction(normalizedText: string): boolean {
@@ -1530,6 +1619,17 @@ function buildAmbiguousItemReply(query: string, options: MenuCatalogItem[], roma
   ].join("\n");
 }
 
+function buildItemMatchesReply(query: string, options: MenuCatalogItem[], romanUrdu: boolean): string {
+  const lines = options.slice(0, 10).map((item, index) => `${index + 1}. ${item.name} - Rs. ${item.price}`);
+  return [
+    romanUrdu ? `*${query}* ke related items ye hain:` : `Here are matching items for *${query}*:`,
+    ...lines,
+    romanUrdu
+      ? "Order ke liye number select karein ya item name + quantity bhej dein."
+      : "Reply with a number, or send item name with quantity to order.",
+  ].join("\n");
+}
+
 function buildUnknownItemReply(
   unknown: string[],
   menuItems: MenuCatalogItem[],
@@ -1659,6 +1759,25 @@ function handleOrderTypeSelection(
   trace?: TurnTrace,
 ): TurnDecision {
   const romanUrdu = preferredLanguage === "roman_urdu";
+
+  if (state.cart.length === 0) {
+    return replyDecision(
+      romanUrdu
+        ? "Cart empty hai. Pehle item add karein, phir order type choose karein."
+        : "Your cart is empty. Add an item first, then choose order type.",
+      withPreferredLanguage(
+        {
+          workflow_step: "collecting_items",
+          order_type: null,
+          address: null,
+          guests: null,
+          reservation_time: null,
+        },
+        preferredLanguage,
+      ),
+      trace,
+    );
+  }
 
   if (orderType === "delivery") {
     if (!context.settings.delivery_enabled) {
@@ -1841,6 +1960,27 @@ function buildSummaryReply(
 ): TurnDecision {
   const state = params.state;
   const romanUrdu = state.preferred_language === "roman_urdu";
+
+  if (state.cart.length === 0) {
+    return replyDecision(
+      romanUrdu
+        ? "Cart empty hai. Please pehle item add karein."
+        : "Your cart is empty. Please add items first.",
+      withPreferredLanguage(
+        {
+          workflow_step: "collecting_items",
+          order_type: null,
+          address: null,
+          guests: null,
+          reservation_time: null,
+          summary_sent_at: null,
+        },
+        state.preferred_language,
+      ),
+      trace,
+    );
+  }
+
   const subtotal = state.cart.reduce((sum, item) => sum + item.price * item.qty, 0);
   const deliveryFee =
     state.order_type === "delivery" && params.settings.delivery_enabled && params.settings.delivery_fee > 0
