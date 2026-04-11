@@ -1890,6 +1890,7 @@ function buildLogisticsOrSummaryReply(
         parts.join("\n\n"),
         withPreferredLanguage(
           {
+            ...buildPersistedStatePatch(params.state),
             workflow_step: "awaiting_upsell_reply",
             upsell_item_name: upsell.name,
             upsell_item_price: upsell.price,
@@ -1911,9 +1912,13 @@ function buildLogisticsOrSummaryReply(
     );
     return replyDecision(
       parts.join("\n\n"),
-      {
-        ...withPreferredLanguage({ workflow_step: "awaiting_order_type" }, params.state.preferred_language),
-      },
+      withPreferredLanguage(
+        {
+          ...buildPersistedStatePatch(params.state),
+          workflow_step: "awaiting_order_type",
+        },
+        params.state.preferred_language,
+      ),
       trace,
     );
   }
@@ -1924,7 +1929,13 @@ function buildLogisticsOrSummaryReply(
     );
     return replyDecision(
       parts.join("\n\n"),
-      withPreferredLanguage({ workflow_step: "awaiting_delivery_address" }, params.state.preferred_language),
+      withPreferredLanguage(
+        {
+          ...buildPersistedStatePatch(params.state),
+          workflow_step: "awaiting_delivery_address",
+        },
+        params.state.preferred_language,
+      ),
       trace,
     );
   }
@@ -1937,7 +1948,13 @@ function buildLogisticsOrSummaryReply(
     );
     return replyDecision(
       parts.join("\n\n"),
-      withPreferredLanguage({ workflow_step: "awaiting_dine_in_details" }, params.state.preferred_language),
+      withPreferredLanguage(
+        {
+          ...buildPersistedStatePatch(params.state),
+          workflow_step: "awaiting_dine_in_details",
+        },
+        params.state.preferred_language,
+      ),
       trace,
     );
   }
@@ -1949,6 +1966,23 @@ function buildLogisticsOrSummaryReply(
     },
     trace,
   );
+}
+
+function buildPersistedStatePatch(state: ConversationState): Partial<ConversationState> {
+  return {
+    cart: state.cart,
+    order_type: state.order_type,
+    address: state.address,
+    guests: state.guests,
+    reservation_time: state.reservation_time,
+    upsell_item_name: state.upsell_item_name,
+    upsell_item_price: state.upsell_item_price,
+    upsell_offered: state.upsell_offered,
+    declined_upsells: state.declined_upsells,
+    last_presented_options: state.last_presented_options,
+    last_presented_options_at: state.last_presented_options_at,
+    summary_sent_at: state.summary_sent_at,
+  };
 }
 
 function buildSummaryReply(
@@ -2017,6 +2051,7 @@ function buildSummaryReply(
     lines.join("\n"),
     withPreferredLanguage(
       {
+        ...buildPersistedStatePatch(state),
         workflow_step: "awaiting_confirmation",
         summary_sent_at: new Date().toISOString(),
       },
