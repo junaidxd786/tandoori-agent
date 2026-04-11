@@ -1002,6 +1002,7 @@ function handleAwaitingConfirmation(params: {
   if (
     interpretation.wants_confirmation === false ||
     interpretation.intent === "modify_order" ||
+    interpretation.intent === "add_items" ||
     matchedAdds.matched.length > 0 ||
     removeRequests.length > 0 ||
     qtyUpdates.length > 0 ||
@@ -1043,6 +1044,40 @@ function handleAwaitingConfirmation(params: {
           .join("\n"),
         menuItems: context.menuItems,
       },
+      trace,
+    );
+  }
+
+  const askedForEditsWithoutResolvedItems =
+    interpretation.add_items.length > 0 ||
+    /(?:\badd\b|\baur\b|\bbhi\b|\bplus\b|kar do|kr do|remove|delete|minus|kam kr|kam kar)/.test(normalizedText);
+  if (askedForEditsWithoutResolvedItems) {
+    const unresolvedUnknown = [
+      ...matchedAdds.unknown,
+      ...interpretation.unknown_items,
+      ...interpretation.add_items.map((item) => item.name),
+    ]
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const uniqueUnknown = [...new Set(unresolvedUnknown)].slice(0, 3);
+    const unknownReply = buildUnknownItemReplyData(
+      uniqueUnknown.length > 0 ? uniqueUnknown : [context.messageText],
+      context.menuItems,
+      prefersRomanUrdu,
+      context.semanticMatches,
+    );
+
+    return replyDecision(
+      unknownReply.text,
+      withPreferredLanguage(
+        {
+          workflow_step: "collecting_items",
+          summary_sent_at: null,
+          last_presented_options: unknownReply.selectableItems,
+          last_presented_options_at: unknownReply.selectableItems.length > 0 ? new Date().toISOString() : null,
+        },
+        preferredLanguage,
+      ),
       trace,
     );
   }
@@ -2879,6 +2914,9 @@ function isGroundedItemRequest(rawText: string, requestName: string, semanticMat
   if (!normalizedRaw || !normalizedRequest) return false;
 
   if (normalizedRaw.includes(normalizedRequest)) return true;
+  const compactRaw = normalizeCompact(rawText);
+  const compactRequest = normalizeCompact(requestName);
+  if (compactRaw && compactRequest && compactRaw.includes(compactRequest)) return true;
 
   const requestTokens = normalizedRequest.split(" ").filter((token) => token.length >= 4);
   if (requestTokens.some((token) => normalizedRaw.includes(token))) return true;
@@ -2893,6 +2931,16 @@ function isGroundedItemRequest(rawText: string, requestName: string, semanticMat
 function itemSimilarityScore(left: string, right: string): number {
   if (left === right) return 1;
   if (left.includes(right) || right.includes(left)) return 0.85;
+
+  const leftCompact = normalizeCompact(left);
+  const rightCompact = normalizeCompact(right);
+  if (leftCompact && rightCompact) {
+    if (leftCompact === rightCompact && leftCompact.length >= 4) return 0.92;
+    const minCompactLength = Math.min(leftCompact.length, rightCompact.length);
+    if (minCompactLength >= 5 && (leftCompact.includes(rightCompact) || rightCompact.includes(leftCompact))) {
+      return 0.74;
+    }
+  }
 
   const leftTokens = new Set(left.split(" ").filter(Boolean));
   const rightTokens = new Set(right.split(" ").filter(Boolean));
