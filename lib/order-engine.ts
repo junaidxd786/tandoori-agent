@@ -970,7 +970,7 @@ function handleAwaitingConfirmation(params: {
 
   if (interpretation.wants_confirmation === true || isExplicitYes(normalizedText)) {
     const validation = validateDraftForPlacement(state, context.settings);
-    if (!validation.ok) {
+    if (validation.ok === false) {
       return replyDecision(
         validation.reply(prefersRomanUrdu),
         withPreferredLanguage(validation.statePatch, preferredLanguage),
