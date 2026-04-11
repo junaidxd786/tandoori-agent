@@ -668,68 +668,16 @@ async function drainConversationQueue(conversation: ConversationRow) {
         is_bot_active: conversation.mode !== "human",
       });
       const semanticMatches = await getSemanticMenuMatches(conversation.branch_id, nextMessage.content, 5);
-      
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nextMessage.content.trim());
-      
-      let decision: TurnDecision | null = null;
-      if (isUuid) {
-        const item = menuItems.find((i) => i.id === nextMessage.content.trim());
-        if (item) {
-          const nextCart = [
-            ...state.cart,
-            { name: item.name, price: Number(item.price), qty: 1, category: item.category },
-          ];
-          decision = {
-            kind: "reply",
-            statePatch: { cart: nextCart, workflow_step: "collecting_items", last_presented_options: null },
-            reply: `Added 1 ${item.name} to your cart.`,
-            trace: { intent: "add_items", confidence: 1, unknownItems: [], notes: "uuid selected" }
-          };
-        }
-      } else if (semanticMatches.length === 1) {
-        const match = semanticMatches[0];
-        const item = menuItems.find((i) => i.id === match.id);
-        if (item) {
-          const nextCart = [
-            ...state.cart,
-            { name: item.name, price: Number(item.price), qty: 1, category: item.category },
-          ];
-          decision = {
-            kind: "reply",
-            statePatch: { cart: nextCart, workflow_step: "collecting_items", last_presented_options: null },
-            reply: `Added 1 ${item.name} to your cart.`,
-            trace: { intent: "add_items", confidence: 1, unknownItems: [], notes: "semantic 1 match" }
-          };
-        }
-      } else if (semanticMatches.length >= 2 && semanticMatches.length <= 10) {
-        const options = semanticMatches
-          .map((m) => menuItems.find((i) => i.id === m.id))
-          .filter(Boolean) as MenuCatalogItem[];
-        if (options.length > 0) {
-          decision = {
-            kind: "reply",
-            statePatch: {
-              last_presented_options: options,
-              last_presented_options_at: new Date().toISOString(),
-            },
-            reply: "I found a few matching items. Please select one to add to your cart:",
-            trace: { intent: "add_items", confidence: 1, unknownItems: [], notes: "semantic list" }
-          };
-        }
-      }
-
-      if (!decision) {
-        decision = await decideTurn({
-          messageText: nextMessage.content,
-          state,
-          menuItems,
-          semanticMatches,
-          settings,
-          isOpenNow,
-          recentOrder,
-          session,
-        });
-      }
+      const decision = await decideTurn({
+        messageText: nextMessage.content,
+        state,
+        menuItems,
+        semanticMatches,
+        settings,
+        isOpenNow,
+        recentOrder,
+        session,
+      });
 
       const updatedState: Partial<ConversationState> = decision.statePatch ?? {};
       const nextStateSnapshot = parseConversationState({

@@ -495,6 +495,31 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     );
   }
 
+  if (asksOpeningHours(normalizedText)) {
+    const prompt = context.isOpenNow
+      ? prefersRomanUrdu
+        ? `Ji, restaurant abhi open hai. Timings ${context.settings.opening_time} se ${context.settings.closing_time} hain.`
+        : `Yes, the restaurant is currently open. Timings are ${context.settings.opening_time} to ${context.settings.closing_time}.`
+      : prefersRomanUrdu
+        ? `Filhal restaurant closed hai. Timings ${context.settings.opening_time} se ${context.settings.closing_time} hain.`
+        : `The restaurant is currently closed. Timings are ${context.settings.opening_time} to ${context.settings.closing_time}.`;
+    return replyDecision(
+      maybeAppendCheckoutPrompt(prompt, state, prefersRomanUrdu),
+      withPreferredLanguage({}, preferredLanguage),
+      trace,
+    );
+  }
+
+  if (asksContactDetails(normalizedText)) {
+    const contact = context.settings.phone_delivery?.trim() || context.settings.phone_dine_in?.trim() || "support line";
+    const prompt = prefersRomanUrdu ? `Contact number: ${contact}.` : `Contact number: ${contact}.`;
+    return replyDecision(
+      maybeAppendCheckoutPrompt(prompt, state, prefersRomanUrdu),
+      withPreferredLanguage({}, preferredLanguage),
+      trace,
+    );
+  }
+
   if (
     interpretation.asks_menu ||
     interpretation.intent === "browse_menu" ||
@@ -576,6 +601,11 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   );
   const removeRequests = resolveRemovalRequests(interpretation, state.cart, rawText);
   const qtyUpdates = resolveQuantityUpdates(rawText, state.cart);
+  if (qtyUpdates.length > 0 && isLikelyQuantityOnlyInstruction(normalizedText)) {
+    const qtyTargets = new Set(qtyUpdates.map((entry) => normalizeText(entry.name)));
+    matchedAdds.matched = matchedAdds.matched.filter((entry) => !qtyTargets.has(normalizeText(entry.name)));
+    matchedAdds.ambiguous = [];
+  }
 
   if (state.workflow_step === "awaiting_confirmation") {
     return handleAwaitingConfirmation({
@@ -606,6 +636,16 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   if (state.last_presented_options && state.last_presented_options.length > 0) {
+    const directSelection = findPresentedOptionByDirectValue(rawText, state.last_presented_options);
+    if (directSelection) {
+      matchedAdds.matched.push({
+        name: directSelection.name,
+        qty: 1,
+        price: directSelection.price,
+        category: directSelection.category,
+      });
+    }
+
     const selection = parseSelectionWithQty(rawText, state.last_presented_options.length);
     if (selection) {
       const selected = state.last_presented_options[selection.optionIndex];
@@ -1112,6 +1152,24 @@ function isExplicitNo(text: string): boolean {
 
 function isLikelyMenuRequest(text: string): boolean {
   return /(menu|show.*menu|what.*have|list.*items|kya.*hai|dikhao)/.test(text);
+}
+
+function isLikelyQuantityOnlyInstruction(normalizedText: string): boolean {
+  return (
+    /\b(quantity|qty|set|update|change)\b/.test(normalizedText) ||
+    /\b(aik aur|ek aur|one more|aur kar|aur kr|barha|barhao|increase)\b/.test(normalizedText)
+  );
+}
+
+function asksOpeningHours(normalizedText: string): boolean {
+  return (
+    /\b(open|close|timing|hours?)\b/.test(normalizedText) ||
+    /\b(kab open|kab band|open hota|band hota|timings?)\b/.test(normalizedText)
+  );
+}
+
+function asksContactDetails(normalizedText: string): boolean {
+  return /\b(phone|number|contact|call)\b/.test(normalizedText);
 }
 
 function attemptsCheckoutProgression(
@@ -1697,6 +1755,7 @@ function buildLogisticsOrSummaryReply(
   if (
     params.state.order_type == null &&
     params.matchedAdds.matched.length > 0 &&
+    params.state.cart.length >= 2 &&
     !params.state.upsell_offered &&
     Array.isArray(params.menuItems)
   ) {
@@ -1966,6 +2025,10 @@ function resolveRequestedItems(
   const requests = requested.length > 0 ? requested : findInlineItems(rawText, menuItems);
 
   for (const request of requests) {
+    if (requested.length > 0 && !isGroundedItemRequest(rawText, request.name, semanticMatches)) {
+      continue;
+    }
+
     const normalizedRequest = normalizeText(request.name);
     if (!normalizedRequest) continue;
 
@@ -2055,6 +2118,23 @@ function findInlineItems(rawText: string, menuItems: MenuCatalogItem[]): Array<{
   return items;
 }
 
+function isGroundedItemRequest(rawText: string, requestName: string, semanticMatches: SemanticMenuMatch[]): boolean {
+  const normalizedRaw = normalizeText(rawText);
+  const normalizedRequest = normalizeText(requestName);
+  if (!normalizedRaw || !normalizedRequest) return false;
+
+  if (normalizedRaw.includes(normalizedRequest)) return true;
+
+  const requestTokens = normalizedRequest.split(" ").filter((token) => token.length >= 4);
+  if (requestTokens.some((token) => normalizedRaw.includes(token))) return true;
+
+  return semanticMatches.some(
+    (match) =>
+      normalizeText(match.name) === normalizedRequest &&
+      (match.similarity ?? 0) >= 0.72,
+  );
+}
+
 function itemSimilarityScore(left: string, right: string): number {
   if (left === right) return 1;
   if (left.includes(right) || right.includes(left)) return 0.85;
@@ -2128,11 +2208,44 @@ function resolveQuantityUpdates(rawText: string, cart: DraftCartItem[]): CartQty
     updates.push({ name: cart[cart.length - 1].name, qty });
   }
 
+  const increment = inferQuantityIncrement(normalized);
+  if (increment != null) {
+    const target = findCartItemMentionedInText(normalized, cart) ?? cart[cart.length - 1];
+    if (target) {
+      updates.push({
+        name: target.name,
+        qty: clampQty(target.qty + increment),
+      });
+    }
+  }
+
   const byName = new Map<string, CartQtyUpdate>();
   for (const update of updates) {
     byName.set(normalizeText(update.name), update);
   }
   return [...byName.values()];
+}
+
+function inferQuantityIncrement(normalizedText: string): number | null {
+  const hasIncrementSignal =
+    /\b(aik aur|ek aur|one more|aur kar|aur kr|aur kar do|increase|barha|barhao)\b/.test(normalizedText);
+  if (!hasIncrementSignal) return null;
+
+  const qty = extractAnyQuantity(normalizedText);
+  if (qty != null && qty > 0) {
+    return clampQty(qty);
+  }
+
+  return 1;
+}
+
+function findCartItemMentionedInText(normalizedText: string, cart: DraftCartItem[]): DraftCartItem | null {
+  for (const item of cart) {
+    const itemName = normalizeText(item.name);
+    if (!itemName) continue;
+    if (normalizedText.includes(itemName)) return item;
+  }
+  return null;
 }
 
 function extractDirectRemovalRequests(rawText: string, cart: DraftCartItem[]): CartRemovalRequest[] {
@@ -2261,6 +2374,18 @@ function mergeCartItems(current: DraftCartItem[], additions: DraftCartItem[]): D
 function clampQty(qty: number): number {
   if (!Number.isFinite(qty) || qty <= 0) return 1;
   return Math.max(1, Math.min(Math.floor(qty), 50));
+}
+
+function findPresentedOptionByDirectValue(rawText: string, options: MenuCatalogItem[]): MenuCatalogItem | null {
+  const trimmed = rawText.trim();
+  if (!trimmed) return null;
+
+  const byId = options.find((item) => item.id === trimmed);
+  if (byId) return byId;
+
+  const normalized = normalizeText(trimmed);
+  if (!normalized) return null;
+  return options.find((item) => normalizeText(item.name) === normalized) ?? null;
 }
 
 function shouldDeferToContextSwitchFallback(
