@@ -1,7 +1,9 @@
 import { supabaseAdmin } from "./supabase-admin";
 import {
+  sendWhatsAppInteractiveFlow,
   sendWhatsAppInteractiveList,
   sendWhatsAppMessage,
+  type WhatsAppInteractiveFlowPayload,
   type WhatsAppInteractiveListPayload,
 } from "./whatsapp";
 
@@ -28,6 +30,10 @@ type OutboundMessageParams = {
 
 type OutboundInteractiveMessageParams = OutboundMessageParams & {
   interactive: WhatsAppInteractiveListPayload;
+};
+
+type OutboundFlowMessageParams = OutboundMessageParams & {
+  flow: WhatsAppInteractiveFlowPayload;
 };
 
 function toErrorMessage(error: unknown): string {
@@ -135,6 +141,67 @@ export async function sendAndPersistOutboundInteractiveMessage({
 
   try {
     const result = await sendWhatsAppInteractiveList(phone, interactive);
+    const { error: updateError } = await supabaseAdmin
+      .from("messages")
+      .update({
+        whatsapp_msg_id: result.messageId,
+        delivery_status: "sent",
+        delivery_error: null,
+      })
+      .eq("id", inserted.id);
+
+    if (updateError) {
+      throw new OutboundMessageError(updateError.message, true, inserted.id);
+    }
+
+    return {
+      id: inserted.id,
+      whatsappMessageId: result.messageId,
+    };
+  } catch (error) {
+    const message = toErrorMessage(error);
+
+    await supabaseAdmin
+      .from("messages")
+      .update({
+        delivery_status: error instanceof OutboundMessageError && error.messageSent ? "sent" : "failed",
+        delivery_error: message,
+      })
+      .eq("id", inserted.id);
+
+    if (error instanceof OutboundMessageError) {
+      throw error;
+    }
+
+    throw new OutboundMessageError(message, false, inserted.id);
+  }
+}
+
+export async function sendAndPersistOutboundFlowMessage({
+  conversationId,
+  phone,
+  content,
+  senderKind,
+  flow,
+}: OutboundFlowMessageParams) {
+  const { data: inserted, error: insertError } = await supabaseAdmin
+    .from("messages")
+    .insert({
+      conversation_id: conversationId,
+      role: "assistant",
+      sender_kind: senderKind,
+      content,
+      delivery_status: "pending",
+    })
+    .select("id")
+    .single();
+
+  if (insertError || !inserted) {
+    throw insertError ?? new Error("Failed to persist outbound Flow message before send.");
+  }
+
+  try {
+    const result = await sendWhatsAppInteractiveFlow(phone, flow);
     const { error: updateError } = await supabaseAdmin
       .from("messages")
       .update({

@@ -12,6 +12,7 @@ import {
 import { escalateToHuman } from "@/lib/handoff";
 import {
   OutboundMessageError,
+  sendAndPersistOutboundFlowMessage,
   sendAndPersistOutboundInteractiveMessage,
   sendAndPersistOutboundMessage,
 } from "@/lib/messages";
@@ -32,12 +33,22 @@ import { getRestaurantSettings, isWithinOperatingHours } from "@/lib/settings";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { buildSessionUpdate, getOrCreateUserSession, updateUserSession } from "@/lib/user-session";
 import {
+  buildWhatsAppFlowPayload,
+  extractFlowResponseCommand,
+  type WhatsAppFlowContext,
+} from "@/lib/whatsapp-flow";
+import {
   claimWebhookEvent,
   markWebhookEventFailed,
   markWebhookEventProcessed,
   recordWebhookEvent,
 } from "@/lib/webhook-events";
-import { sendWhatsAppInteractiveList, sendWhatsAppMessage } from "@/lib/whatsapp";
+import {
+  sendWhatsAppInteractiveFlow,
+  sendWhatsAppInteractiveList,
+  sendWhatsAppMessage,
+  type WhatsAppInteractiveFlowPayload,
+} from "@/lib/whatsapp";
 
 type IncomingWhatsAppMessage = {
   id: string;
@@ -46,7 +57,7 @@ type IncomingWhatsAppMessage = {
   timestamp: string;
   text?: { body?: string };
   interactive?: {
-    type?: "button_reply" | "list_reply";
+    type?: "button_reply" | "list_reply" | "nfm_reply";
     button_reply?: {
       id?: string;
       title?: string;
@@ -55,6 +66,11 @@ type IncomingWhatsAppMessage = {
       id?: string;
       title?: string;
       description?: string;
+    };
+    nfm_reply?: {
+      name?: string;
+      body?: string;
+      response_json?: string;
     };
   };
 };
@@ -230,10 +246,21 @@ async function processWebhook(body: unknown) {
         ? `Theek hai, *${selectedBranch.name}* select ho gayi. Address: ${selectedBranch.address}\n\nAb apna order bhej dein.`
         : `Great, you've selected *${selectedBranch.name}*. Address: ${selectedBranch.address}\n\nSend your order whenever you're ready.`;
 
+      const initialMenuFlow = buildFlowMessageForAgentReply({
+        context: "menu",
+        conversationId: selectedConversation.id,
+        prefersRomanUrdu,
+        workflowStep: "collecting_items",
+        branch: selectedBranch,
+        body: assistantReply,
+      });
+
       await sendAndPersistAssistantMessage(
         selectedConversation.id,
         message.from,
         assistantReply,
+        null,
+        initialMenuFlow,
       );
       
       await markMessageProcessed(selectedState, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
@@ -268,12 +295,23 @@ async function processWebhook(body: unknown) {
 
     if (!incomingContent) {
       if (message.type !== "reaction") {
+        const nonTextReply =
+          state.preferred_language === "roman_urdu"
+            ? "Please text message bhej dein, main menu aur order mein help kar deta hoon."
+            : "Please send a text message and I'll help you with the menu or your order.";
+        const nonTextFlow = buildFlowMessageForAgentReply({
+          context: "menu",
+          conversationId: conversation.id,
+          prefersRomanUrdu: state.preferred_language === "roman_urdu",
+          workflowStep: state.workflow_step,
+          body: nonTextReply,
+        });
         await sendAndPersistAssistantMessage(
           conversation.id,
           message.from,
-          state.preferred_language === "roman_urdu"
-            ? "Please text message bhej dein, main menu aur order mein help kar deta hoon."
-            : "Please send a text message and I'll help you with the menu or your order.",
+          nonTextReply,
+          null,
+          nonTextFlow,
         );
       }
       await markMessageProcessed(state, message.id, toIsoTimestamp(message.timestamp), null);
@@ -292,11 +330,20 @@ async function processWebhook(body: unknown) {
       });
       await setActiveBranch(contact.id, null);
       const interactiveList = buildInteractiveListForBranches(branches, state.preferred_language === "roman_urdu");
+      const branchFlow = buildFlowMessageForAgentReply({
+        context: "branch",
+        conversationId: conversation.id,
+        prefersRomanUrdu: state.preferred_language === "roman_urdu",
+        workflowStep: "awaiting_branch_selection",
+        branches,
+        body: interactiveList ? interactiveList.body : getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
+      });
       await sendAndPersistAssistantMessage(
         conversation.id,
         message.from,
         interactiveList ? interactiveList.body : getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
         interactiveList,
+        branchFlow,
       );
       await markMessageProcessed(state, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
       const session = await getOrCreateUserSession(conversation.id);
@@ -389,6 +436,15 @@ function extractIncomingContent(message: IncomingWhatsAppMessage): string | null
   }
 
   if (message.type === "interactive") {
+    const flowReply = message.interactive?.nfm_reply;
+    if (flowReply?.response_json) {
+      const extracted = extractFlowResponseCommand(flowReply.response_json);
+      if (extracted) return extracted.trim();
+
+      const compact = flowReply.response_json.trim();
+      if (compact) return compact;
+    }
+
     const listReply = message.interactive?.list_reply;
     if (listReply?.id) return listReply.id.trim();
     if (listReply?.title) return listReply.title.trim();
@@ -780,7 +836,39 @@ async function drainConversationQueue(conversation: ConversationRow) {
             )
             : null);
 
-        await sendAndPersistAssistantMessage(conversation.id, conversation.phone, reply, interactiveList);
+        const flowMessage =
+          decision.kind === "place_order"
+            ? null
+            : buildFlowMessageForAgentReply({
+                conversationId: conversation.id,
+                prefersRomanUrdu: (updatedState.preferred_language ?? state.preferred_language) === "roman_urdu",
+                workflowStep: nextStateSnapshot.workflow_step,
+                branch: {
+                  id: branch.id,
+                  slug: branch.slug,
+                  name: branch.name,
+                  address: branch.address,
+                },
+                menuItems,
+                cart: nextStateSnapshot.cart,
+                orderType: nextStateSnapshot.order_type,
+                address: nextStateSnapshot.address,
+                guests: nextStateSnapshot.guests,
+                reservationTime: nextStateSnapshot.reservation_time,
+                settings,
+                suggestedUpsell:
+                  typeof nextStateSnapshot.upsell_item_name === "string" &&
+                  nextStateSnapshot.upsell_item_name.trim() &&
+                  typeof nextStateSnapshot.upsell_item_price === "number"
+                    ? {
+                        name: nextStateSnapshot.upsell_item_name,
+                        price: nextStateSnapshot.upsell_item_price,
+                      }
+                    : null,
+                body: reply,
+              });
+
+        await sendAndPersistAssistantMessage(conversation.id, conversation.phone, reply, interactiveList, flowMessage);
         await updateConversationState(state, {
           ...updatedState,
           last_processed_user_message_id: nextMessage.whatsapp_msg_id,
@@ -955,7 +1043,6 @@ async function getNextPendingUserMessage(
     .select("id, ingest_seq, content, created_at, whatsapp_msg_id")
     .eq("conversation_id", conversationId)
     .eq("role", "user")
-    .order("created_at", { ascending: true })
     .order("ingest_seq", { ascending: true })
     .limit(1);
 
@@ -1022,16 +1109,48 @@ async function sendAndPersistAssistantMessage(
     sectionTitle?: string;
     rows: Array<{ id: string; title: string; description?: string }>;
   } | null,
+  flowMessage?: WhatsAppInteractiveFlowPayload | null,
 ) {
+  if (flowMessage) {
+    try {
+      await sendAndPersistOutboundFlowMessage({
+        conversationId,
+        phone,
+        content,
+        senderKind: "ai",
+        flow: flowMessage,
+      });
+      return;
+    } catch (error) {
+      if (!(error instanceof OutboundMessageError && !error.messageSent)) {
+        throw error;
+      }
+    }
+  }
+
   if (interactiveList && interactiveList.rows.length > 0) {
-    await sendAndPersistOutboundInteractiveMessage({
-      conversationId,
-      phone,
-      content,
-      senderKind: "ai",
-      interactive: interactiveList,
-    });
-    return;
+    try {
+      await sendAndPersistOutboundInteractiveMessage({
+        conversationId,
+        phone,
+        content,
+        senderKind: "ai",
+        interactive: interactiveList,
+      });
+      return;
+    } catch (error) {
+      if (error instanceof OutboundMessageError && !error.messageSent) {
+        await sendAndPersistOutboundMessage({
+          conversationId,
+          phone,
+          content: `${content}\n\n${buildInteractiveFallbackText(interactiveList)}`,
+          senderKind: "ai",
+        });
+        return;
+      }
+
+      throw error;
+    }
   }
 
   await sendAndPersistOutboundMessage({
@@ -1276,13 +1395,119 @@ function buildInteractiveListForBranches(
   };
 }
 
+function buildBranchSelectionFlowMessage(
+  phone: string,
+  branches: BranchSummary[],
+  prefersRomanUrdu: boolean,
+): WhatsAppInteractiveFlowPayload | null {
+  return buildWhatsAppFlowPayload({
+    context: "branch",
+    body: prefersRomanUrdu
+      ? "Branch choose karne ke liye rich menu khol dein."
+      : "Open the rich branch picker to continue.",
+    preferredLanguage: prefersRomanUrdu ? "roman_urdu" : "english",
+    branches,
+    workflowStep: "awaiting_branch_selection",
+    conversationId: phone,
+  });
+}
+
+function buildFlowMessageForAgentReply(input: {
+  context?: WhatsAppFlowContext;
+  conversationId: string;
+  prefersRomanUrdu: boolean;
+  workflowStep: ConversationState["workflow_step"];
+  branch?: { id: string; slug?: string | null; name: string; address?: string | null } | null;
+  branches?: BranchSummary[];
+  menuItems?: MenuCatalogItem[];
+  cart?: ConversationState["cart"];
+  orderType?: ConversationState["order_type"];
+  address?: ConversationState["address"];
+  guests?: ConversationState["guests"];
+  reservationTime?: ConversationState["reservation_time"];
+  settings?: Awaited<ReturnType<typeof getRestaurantSettings>>;
+  suggestedUpsell?: { name: string; price: number } | null;
+  body: string;
+}): WhatsAppInteractiveFlowPayload | null {
+  const context = input.context ?? inferFlowContext(input.workflowStep);
+  if (!context) return null;
+
+  return buildWhatsAppFlowPayload({
+    context,
+    conversationId: input.conversationId,
+    body: input.body,
+    preferredLanguage: input.prefersRomanUrdu ? "roman_urdu" : "english",
+    workflowStep: input.workflowStep,
+    branch: input.branch ?? undefined,
+    branches: input.branches,
+    menuItems: input.menuItems,
+    cart: input.cart,
+    orderType: input.orderType,
+    address: input.address,
+    guests: input.guests,
+    reservationTime: input.reservationTime,
+    settings: input.settings,
+    suggestedUpsell: input.suggestedUpsell,
+  });
+}
+
+function inferFlowContext(workflowStep: ConversationState["workflow_step"]): WhatsAppFlowContext | null {
+  if (workflowStep === "awaiting_branch_selection") return "branch";
+  if (workflowStep === "awaiting_upsell_reply") return "upsell";
+  if (
+    workflowStep === "awaiting_order_type" ||
+    workflowStep === "awaiting_delivery_address" ||
+    workflowStep === "awaiting_dine_in_details" ||
+    workflowStep === "awaiting_confirmation"
+  ) {
+    return "checkout";
+  }
+
+  if (
+    workflowStep === "idle" ||
+    workflowStep === "collecting_items" ||
+    workflowStep === "awaiting_resume_decision"
+  ) {
+    return "menu";
+  }
+
+  return null;
+}
+
 async function sendBranchSelectionMessage(phone: string, branches: BranchSummary[], prefersRomanUrdu: boolean) {
+  const flowMessage = buildBranchSelectionFlowMessage(phone, branches, prefersRomanUrdu);
+  if (flowMessage) {
+    try {
+      await sendWhatsAppInteractiveFlow(phone, flowMessage);
+      return;
+    } catch (error) {
+      console.warn("[webhook] Flow branch selector failed, falling back to interactive list:", error);
+    }
+  }
+
   const interactiveList = buildInteractiveListForBranches(branches, prefersRomanUrdu);
   if (interactiveList) {
-    await sendWhatsAppInteractiveList(phone, interactiveList);
+    try {
+      await sendWhatsAppInteractiveList(phone, interactiveList);
+    } catch (error) {
+      console.warn("[webhook] Interactive branch list failed, falling back to text:", error);
+      await sendWhatsAppMessage(phone, getBranchSelectionPrompt(branches, prefersRomanUrdu));
+    }
   } else {
     await sendWhatsAppMessage(phone, getBranchSelectionPrompt(branches, prefersRomanUrdu));
   }
+}
+
+function buildInteractiveFallbackText(payload: {
+  body: string;
+  rows: Array<{ title: string; description?: string }>;
+}) {
+  const options = payload.rows
+    .slice(0, 10)
+    .map((row, index) => `${index + 1}. ${row.title}${row.description ? ` - ${row.description}` : ""}`)
+    .join("\n");
+
+  return [payload.body, options].filter(Boolean).join("\n");
 }
 
 function toIsoTimestamp(timestamp: string): string {

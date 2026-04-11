@@ -11,6 +11,8 @@ Production-grade WhatsApp ordering assistant for **Tandoori Restaurant Wah (New 
 - 📳 **Status Notifications** — Customers get WhatsApp messages when order status changes
 - 🛡️ **Idempotent Ordering** — Orders are tied to the source WhatsApp confirmation message to prevent duplicate placement
 
+- ðŸ§­ **WhatsApp Flows UX** â€” Rich native flow screens for branch selection, menu browse, and checkout
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -46,6 +48,8 @@ cp .env.example .env.local
 | `WHATSAPP_PHONE_NUMBER_ID` | Meta → WhatsApp → API Setup |
 | `WHATSAPP_ACCESS_TOKEN` | Meta → WhatsApp → API Setup |
 | `WHATSAPP_VERIFY_TOKEN` | Any secret string you choose |
+| `WHATSAPP_FLOW_ID` / `WHATSAPP_FLOW_NAME` | Meta → WhatsApp Flows |
+| `WHATSAPP_FLOW_PRIVATE_KEY` | Private key matching your uploaded Flow public key |
 
 ### 3. Database Schema
 
@@ -78,6 +82,11 @@ npx ngrok http 3000
 Use the ngrok HTTPS URL as your webhook in Meta:
 ```
 https://your-ngrok-id.ngrok-free.app/api/webhook
+```
+
+If you use endpoint-powered Flows, set your Flow endpoint URL to:
+```
+https://your-ngrok-id.ngrok-free.app/api/whatsapp/flows
 ```
 
 ### 6. Configure Meta Webhook
@@ -115,6 +124,24 @@ WhatsApp Message
 | POST | `/api/conversations/[id]` | Send manual message (human mode) |
 | GET | `/api/orders` | All orders with items |
 | PATCH | `/api/orders/[id]/status` | Update status + notify customer |
+| POST | `/api/whatsapp/flows` | Encrypted WhatsApp Flow data exchange endpoint |
+
+## WhatsApp Flows Integration
+
+This app now supports:
+
+- Sending `interactive.type = "flow"` messages with retry + fallback
+- Passing live menu/cart/checkout context via `flow_action_payload.data`
+- Parsing `interactive.nfm_reply.response_json` into order commands
+- Optional endpoint-powered flows on `/api/whatsapp/flows` (`INIT`, `BACK`, `data_exchange`, `ping`)
+
+Recommended production setup:
+
+1. Create and publish a Flow in Meta.
+2. Configure `WHATSAPP_FLOW_ID` (preferred) or `WHATSAPP_FLOW_NAME`.
+3. Upload/sign your Flow public key in Meta and set `WHATSAPP_FLOW_PRIVATE_KEY`.
+4. Point your Flow endpoint URL to `/api/whatsapp/flows`.
+5. Keep `WHATSAPP_APP_SECRET` configured so endpoint signature validation stays enabled.
 
 ## Deployment (Vercel)
 
