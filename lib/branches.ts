@@ -96,6 +96,15 @@ export function findBranchSelection(input: string, branches: BranchSummary[]): B
   const normalized = normalizeBranchValue(input);
   if (!normalized) return null;
 
+  // Handle interactive list selection
+  const optionMatch = normalized.match(/^branch_option_(\d+)$/);
+  if (optionMatch) {
+    const index = Number.parseInt(optionMatch[1], 10) - 1;
+    if (index >= 0 && index < branches.length) {
+      return branches[index];
+    }
+  }
+
   const numberMatch = normalized.match(/\b(\d{1,2})\b/);
   if (numberMatch) {
     const index = Number.parseInt(numberMatch[1], 10) - 1;

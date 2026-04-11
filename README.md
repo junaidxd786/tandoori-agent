@@ -123,3 +123,28 @@ vercel deploy
 ```
 
 Set all environment variables in **Vercel → Project → Settings → Environment Variables**, then update your Meta webhook URL to the production URL.
+## MCP Setup
+
+This repo now includes a root [`.mcp.json`](/C:/Users/PMLS/OneDrive/Desktop/tandoori-agent/.mcp.json:1) with:
+
+- `supabase` pointed at this project's Supabase MCP endpoint
+- `next-devtools` for the Next.js 16 dev-server MCP bridge
+
+Run the app locally with:
+
+```bash
+npm run dev
+```
+
+Then reload the Codex workspace or restart the session so the project MCP config is picked up.
+
+## Semantic Retrieval Env
+
+Semantic menu retrieval is configured through:
+
+- `MENU_EMBEDDING_API_KEY`
+- `MENU_EMBEDDING_BASE_URL`
+- `MENU_EMBEDDING_MODEL`
+- `RESTAURANT_TIMEZONE`
+
+These are now filled in `.env.local` for local development. Mirror them into Vercel or your production host if you want pgvector-backed matching in production.

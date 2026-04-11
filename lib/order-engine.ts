@@ -1,9 +1,11 @@
 import { getOrderTurnInterpretation, type OrderTurnInterpretation } from "./ai";
+import type { SemanticMenuMatch } from "./semantic-menu";
 import {
   buildRestaurantDateTimeIso,
   getRestaurantNowParts,
   type RestaurantSettings,
 } from "./settings";
+import type { UserSession } from "./user-session";
 
 export type WorkflowStep =
   | "idle"
@@ -88,15 +90,18 @@ export interface TurnContext {
   messageText: string;
   state: ConversationState;
   menuItems: MenuCatalogItem[];
+  semanticMatches: SemanticMenuMatch[];
   settings: RestaurantSettings;
   isOpenNow: boolean;
   recentOrder: RecentOrderContext | null;
+  session: UserSession;
 }
 
 export interface TurnTrace {
   intent: string;
   confidence: number;
   unknownItems: string[];
+  sentiment?: OrderTurnInterpretation["sentiment"];
   notes: string | null;
 }
 
@@ -104,6 +109,12 @@ export type TurnDecision =
   | {
     kind: "reply";
     reply: string;
+    interactiveList?: {
+      body: string;
+      buttonText: string;
+      sectionTitle?: string;
+      rows: Array<{ id: string; title: string; description?: string }>;
+    } | null;
     statePatch: Partial<ConversationState>;
     trace?: TurnTrace;
   }
@@ -116,6 +127,13 @@ export type TurnDecision =
   }
   | {
     kind: "fallback";
+    statePatch?: Partial<ConversationState>;
+    trace?: TurnTrace;
+  }
+  | {
+    kind: "escalate_to_human";
+    reply: string;
+    reason: string;
     statePatch?: Partial<ConversationState>;
     trace?: TurnTrace;
   };
@@ -364,11 +382,13 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     cart: state.cart.map((item) => ({ name: item.name, qty: item.qty })),
     menuItems,
     isOpenNow: context.isOpenNow,
+    semanticMatches: context.semanticMatches,
   });
   const trace: TurnTrace = {
     intent: interpretation.intent,
     confidence: interpretation.confidence,
     unknownItems: interpretation.unknown_items,
+    sentiment: interpretation.sentiment,
     notes: interpretation.notes,
   };
 
@@ -382,6 +402,29 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
   if (containsAny(normalizedText, CANCEL_WORDS)) {
     interpretation.intent = "cancel_order";
+  }
+
+  if (
+    interpretation.wants_human ||
+    interpretation.sentiment === "angry" ||
+    context.session.invalid_step_count >= 3 ||
+    /(human|manager|agent|representative|insaan|banday se baat|staff)/i.test(rawText)
+  ) {
+    return {
+      kind: "escalate_to_human",
+      reply:
+        preferredLanguage === "roman_urdu"
+          ? "Main aap ko human team se connect kar raha hoon."
+          : "I'm connecting you with a human team member.",
+      reason:
+        interpretation.wants_human || /(human|manager|agent|representative|insaan|banday se baat|staff)/i.test(rawText)
+          ? "Customer requested a human handoff."
+          : interpretation.sentiment === "angry"
+            ? "Detected strong customer frustration."
+            : "Customer is stuck in the workflow repeatedly.",
+      statePatch: withPreferredLanguage({}, preferredLanguage),
+      trace,
+    };
   }
 
   if (state.workflow_step !== "idle" && interpretation.intent === "cancel_order") {
@@ -452,8 +495,9 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     interpretation.intent === "browse_menu" ||
     isLikelyMenuRequest(normalizedText)
   ) {
+    const categoryReply = buildCategoryListReply(menuItems, prefersRomanUrdu);
     return replyDecision(
-      maybeAppendCheckoutPrompt(buildCategoryListReply(menuItems, prefersRomanUrdu), state, prefersRomanUrdu),
+      categoryReply.text,
       withPreferredLanguage(
         {
           workflow_step: state.cart.length > 0 ? "collecting_items" : state.workflow_step,
@@ -461,6 +505,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
         preferredLanguage,
       ),
       trace,
+      categoryReply.interactiveList,
     );
   }
 
@@ -490,6 +535,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     interpretation.unknown_items,
     menuItems,
     rawText,
+    context.semanticMatches,
   );
   const removeRequests = resolveRemovalRequests(interpretation, state.cart);
 
@@ -800,8 +846,8 @@ function handleLogisticsAndFallback(params: {
 
   if (matchedAdds.unknown.length > 0 || interpretation.unknown_items.length > 0) {
     const unknown = [...new Set([...matchedAdds.unknown, ...interpretation.unknown_items])].slice(0, 3);
-    return replyDecision(
-      buildUnknownItemReply(unknown, context.menuItems, prefersRomanUrdu),
+      return replyDecision(
+      buildUnknownItemReply(unknown, context.menuItems, prefersRomanUrdu, context.semanticMatches),
       withPreferredLanguage({ workflow_step: "collecting_items" }, preferredLanguage),
       trace,
     );
@@ -946,10 +992,17 @@ function replyDecision(
   reply: string,
   statePatch: Partial<ConversationState>,
   trace?: TurnTrace,
+  interactiveList?: {
+    body: string;
+    buttonText: string;
+    sectionTitle?: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  } | null,
 ): TurnDecision {
   return {
     kind: "reply",
     reply,
+    interactiveList,
     statePatch,
     trace,
   };
@@ -1034,26 +1087,69 @@ function resetDraftState(): Partial<ConversationState> {
   };
 }
 
-function buildCategoryListReply(menuItems: MenuCatalogItem[], romanUrdu: boolean): string {
+function buildCategoryListReply(menuItems: MenuCatalogItem[], romanUrdu: boolean): {
+  text: string;
+  interactiveList?: {
+    body: string;
+    buttonText: string;
+    sectionTitle?: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  } | null;
+} {
   const categories = [...new Set(menuItems.map((item) => item.category?.trim() || "General"))];
   if (categories.length === 0) {
-    return romanUrdu
-      ? "Is waqt menu update ho raha hai. Thori dair baad try karein."
-      : "The menu is being updated right now. Please try again shortly.";
+    return {
+      text: romanUrdu
+        ? "Is waqt menu update ho raha hai. Thori dair baad try karein."
+        : "The menu is being updated right now. Please try again shortly.",
+    };
   }
 
-  return [
+  const text = [
     "Available categories:",
     ...categories.map((category, index) => `${index + 1}. ${category}`),
     romanUrdu
       ? "Category ka naam bhej dein aur main items dikha deta hoon."
       : "Send a category name and I can show the items.",
   ].join("\n");
+
+  let interactiveList: {
+    body: string;
+    buttonText: string;
+    sectionTitle?: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  } | null = null;
+
+  if (categories.length >= 2 && categories.length <= 10) {
+    interactiveList = {
+      body: romanUrdu
+        ? "Menu categories se ek select karein."
+        : "Choose a category from the menu.",
+      buttonText: romanUrdu ? "Select Category" : "Select Category",
+      sectionTitle: romanUrdu ? "Categories" : "Categories",
+      rows: categories.map((category, index) => ({
+        id: `category_option_${index + 1}`,
+        title: category,
+        description: undefined,
+      })),
+    };
+  }
+
+  return { text, interactiveList };
 }
 
 function findCategoryRequest(text: string, menuItems: MenuCatalogItem[]): string | null {
   const normalized = normalizeText(text);
   const categories = [...new Set(menuItems.map((item) => item.category?.trim() || "General"))];
+
+  // Handle interactive list selection
+  const optionMatch = normalized.match(/^category_option_(\d+)$/);
+  if (optionMatch) {
+    const index = Number.parseInt(optionMatch[1], 10) - 1;
+    if (index >= 0 && index < categories.length) {
+      return categories[index];
+    }
+  }
 
   for (const category of categories) {
     const normCategory = normalizeText(category);
@@ -1161,8 +1257,15 @@ function buildAmbiguousItemReply(query: string, options: MenuCatalogItem[], roma
   ].join("\n");
 }
 
-function buildUnknownItemReply(unknown: string[], menuItems: MenuCatalogItem[], romanUrdu: boolean): string {
-  const candidates = findLikelyMenuSuggestions(unknown.join(" "), menuItems, 3);
+function buildUnknownItemReply(
+  unknown: string[],
+  menuItems: MenuCatalogItem[],
+  romanUrdu: boolean,
+  semanticMatches: SemanticMenuMatch[] = [],
+): string {
+  const candidates = semanticMatches.length > 0
+    ? semanticMatches.slice(0, 3)
+    : findLikelyMenuSuggestions(unknown.join(" "), menuItems, 3);
   const options = candidates.map((item) => `${item.name} - Rs. ${item.price}`);
 
   if (options.length > 0) {
@@ -1506,6 +1609,7 @@ function resolveRequestedItems(
   modelUnknown: string[],
   menuItems: MenuCatalogItem[],
   rawText: string,
+  semanticMatches: SemanticMenuMatch[] = [],
 ): MatchedItemsResult {
   const matched: DraftCartItem[] = [];
   const unknown: string[] = [...modelUnknown];
@@ -1537,6 +1641,23 @@ function resolveRequestedItems(
       .sort((left, right) => right.score - left.score);
 
     if (candidates.length === 0) {
+      const semanticCandidates = semanticMatches
+        .filter((item) => itemSimilarityScore(normalizedRequest, normalizeText(item.name)) >= 0.3)
+        .slice(0, 3);
+      if (semanticCandidates.length > 0) {
+        ambiguous.push({
+          query: request.name,
+          options: semanticCandidates.map((item) => ({
+            id: item.id,
+            name: item.name,
+            price: item.price,
+            category: item.category,
+            is_available: item.is_available,
+          })),
+        });
+        continue;
+      }
+
       unknown.push(request.name);
       continue;
     }

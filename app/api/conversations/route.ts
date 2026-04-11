@@ -33,6 +33,14 @@ export async function GET(req: NextRequest) {
         cart,
         last_error
       ),
+      user_sessions (
+        active_node,
+        status,
+        is_bot_active,
+        invalid_step_count,
+        escalation_reason,
+        escalated_at
+      ),
       messages (
         content,
         role,
@@ -53,6 +61,7 @@ export async function GET(req: NextRequest) {
     .range(offset, offset + limit - 1);
 
   if (error) {
+    console.error("API /conversations DB Error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 

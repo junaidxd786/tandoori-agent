@@ -1,4 +1,5 @@
 import { getCached, invalidateCache, setCached } from "./cache";
+import { syncMenuEmbeddingsForBranch } from "./semantic-menu";
 import { supabaseAdmin } from "./supabase-admin";
 
 export type MenuItem = {
@@ -238,6 +239,9 @@ export async function applyMenuCatalog(branchId: string, items: MenuItem[], repl
   }
 
   invalidateMenuCache(branchId);
+  await syncMenuEmbeddingsForBranch(branchId).catch((error) => {
+    console.error("[menu] Failed to sync semantic embeddings:", error);
+  });
 }
 
 export async function updateMenuFromExtraction(branchId: string, items: MenuItem[]) {

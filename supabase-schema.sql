@@ -418,3 +418,152 @@ begin
   perform apply_menu_catalog(branch_uuid, menu_payload, true);
 end;
 $$;
+
+create extension if not exists vector;
+
+create table if not exists webhook_events (
+  id uuid primary key default gen_random_uuid(),
+  provider text not null default 'meta_whatsapp',
+  delivery_key text not null unique,
+  raw_body text not null,
+  payload jsonb not null,
+  signature text,
+  status text not null default 'received' check (status in ('received', 'processing', 'processed', 'failed')),
+  attempt_count integer not null default 0,
+  received_count integer not null default 1,
+  processing_started_at timestamptz,
+  processed_at timestamptz,
+  last_error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists user_sessions (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null unique references conversations(id) on delete cascade,
+  active_node text not null default 'cart_builder' check (
+    active_node in ('branch_selection', 'menu_lookup', 'cart_builder', 'checkout', 'order_review', 'support', 'human_handoff')
+  ),
+  return_node text check (
+    return_node in ('branch_selection', 'menu_lookup', 'cart_builder', 'checkout', 'order_review', 'support', 'human_handoff')
+  ),
+  status text not null default 'active' check (status in ('active', 'paused', 'human_handoff')),
+  is_bot_active boolean not null default true,
+  invalid_step_count integer not null default 0 check (invalid_step_count >= 0),
+  consecutive_tool_failures integer not null default 0 check (consecutive_tool_failures >= 0),
+  anger_level integer not null default 0 check (anger_level >= 0),
+  last_intent text,
+  last_tool_name text,
+  last_tool_error text,
+  last_user_message text,
+  last_assistant_reply text,
+  last_semantic_candidates jsonb not null default '[]'::jsonb,
+  escalation_reason text,
+  escalated_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists staff_alerts (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  branch_id uuid not null references branches(id) on delete cascade,
+  kind text not null check (kind in ('human_handoff', 'tool_validation', 'webhook_processing', 'delivery_notification')),
+  severity text not null default 'medium' check (severity in ('low', 'medium', 'high')),
+  status text not null default 'open' check (status in ('open', 'acknowledged', 'resolved')),
+  message text not null,
+  resolved_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists menu_item_embeddings (
+  menu_item_id uuid primary key references menu_items(id) on delete cascade,
+  branch_id uuid not null references branches(id) on delete cascade,
+  embedding vector(1536) not null,
+  embedding_model text not null,
+  embedding_source text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_webhook_events_status_created on webhook_events(status, created_at desc);
+create index if not exists idx_user_sessions_conversation on user_sessions(conversation_id);
+create index if not exists idx_user_sessions_status on user_sessions(status, updated_at desc);
+create index if not exists idx_staff_alerts_conversation_status on staff_alerts(conversation_id, status, created_at desc);
+create index if not exists idx_staff_alerts_branch_status on staff_alerts(branch_id, status, created_at desc);
+create index if not exists idx_menu_item_embeddings_branch on menu_item_embeddings(branch_id);
+
+alter table webhook_events enable row level security;
+alter table user_sessions enable row level security;
+alter table staff_alerts enable row level security;
+alter table menu_item_embeddings enable row level security;
+
+drop policy if exists "service_webhook_events" on webhook_events;
+create policy "service_webhook_events" on webhook_events for all using (true);
+drop policy if exists "service_user_sessions" on user_sessions;
+create policy "service_user_sessions" on user_sessions for all using (true);
+drop policy if exists "service_staff_alerts" on staff_alerts;
+create policy "service_staff_alerts" on staff_alerts for all using (true);
+drop policy if exists "service_menu_item_embeddings" on menu_item_embeddings;
+create policy "service_menu_item_embeddings" on menu_item_embeddings for all using (true);
+
+drop trigger if exists update_webhook_events_updated_at on webhook_events;
+create trigger update_webhook_events_updated_at before update on webhook_events for each row execute function update_updated_at_column();
+drop trigger if exists update_user_sessions_updated_at on user_sessions;
+create trigger update_user_sessions_updated_at before update on user_sessions for each row execute function update_updated_at_column();
+drop trigger if exists update_staff_alerts_updated_at on staff_alerts;
+create trigger update_staff_alerts_updated_at before update on staff_alerts for each row execute function update_updated_at_column();
+drop trigger if exists update_menu_item_embeddings_updated_at on menu_item_embeddings;
+create trigger update_menu_item_embeddings_updated_at before update on menu_item_embeddings for each row execute function update_updated_at_column();
+
+alter table order_agent_turns drop constraint if exists order_agent_turns_decision_kind_check;
+alter table order_agent_turns add constraint order_agent_turns_decision_kind_check check (
+  decision_kind in ('reply', 'place_order', 'fallback', 'escalate_to_human')
+) not valid;
+
+do $$
+begin
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'user_sessions') then
+    alter publication supabase_realtime add table user_sessions;
+  end if;
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'staff_alerts') then
+    alter publication supabase_realtime add table staff_alerts;
+  end if;
+end $$;
+
+create or replace function match_menu_items_by_embedding(
+  branch_uuid uuid,
+  query_embedding vector(1536),
+  match_count integer default 5,
+  similarity_threshold double precision default 0.52
+)
+returns table (
+  id uuid,
+  name text,
+  price numeric,
+  category text,
+  description text,
+  is_available boolean,
+  similarity double precision
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select
+    mi.id,
+    mi.name,
+    mi.price,
+    mi.category,
+    mi.description,
+    mi.is_available,
+    1 - (mie.embedding <=> query_embedding) as similarity
+  from menu_item_embeddings as mie
+  join menu_items as mi on mi.id = mie.menu_item_id
+  where mie.branch_id = branch_uuid
+    and mi.is_available = true
+    and 1 - (mie.embedding <=> query_embedding) >= similarity_threshold
+  order by mie.embedding <=> query_embedding
+  limit greatest(match_count, 1);
+$$;

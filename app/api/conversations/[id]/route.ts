@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApiSession } from "@/lib/branch-request";
+import { resumeBotForConversation } from "@/lib/handoff";
 import { persistSystemMessage, sendAndPersistOutboundMessage } from "@/lib/messages";
 import { canAccessConversation } from "@/lib/record-access";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { getOrCreateUserSession, updateUserSession } from "@/lib/user-session";
 
 type ConversationPatchBody = {
   mode?: "agent" | "human";
@@ -50,6 +52,14 @@ export async function GET(
         reservation_time,
         cart,
         last_error
+      ),
+      user_sessions (
+        active_node,
+        status,
+        is_bot_active,
+        invalid_step_count,
+        escalation_reason,
+        escalated_at
       )
     `)
     .eq("id", accessibleConversation.id)
@@ -119,6 +129,24 @@ export async function PATCH(
     await persistSystemMessage(accessibleConversation.id, buildModeChangeNote(mode)).catch((persistError) => {
       console.error("[conversation PATCH] Failed to persist mode change note:", persistError);
     });
+
+    if (mode === "agent") {
+      await resumeBotForConversation(accessibleConversation.id).catch((sessionError) => {
+        console.error("[conversation PATCH] Failed to resume bot session:", sessionError);
+      });
+    } else {
+      const session = await getOrCreateUserSession(accessibleConversation.id).catch(() => null);
+      if (session) {
+        await updateUserSession(accessibleConversation.id, {
+          active_node: "human_handoff",
+          return_node: null,
+          status: "human_handoff",
+          is_bot_active: false,
+        }).catch((sessionError) => {
+          console.error("[conversation PATCH] Failed to pause bot session:", sessionError);
+        });
+      }
+    }
   }
 
   return NextResponse.json(data);

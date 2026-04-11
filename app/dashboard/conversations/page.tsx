@@ -36,6 +36,15 @@ interface ConversationState {
   last_error: string | null;
 }
 
+interface UserSessionState {
+  active_node: string | null;
+  status: string | null;
+  is_bot_active: boolean | null;
+  invalid_step_count: number | null;
+  escalation_reason: string | null;
+  escalated_at: string | null;
+}
+
 interface ConversationPreview {
   id: string;
   branch_id: string;
@@ -47,6 +56,7 @@ interface ConversationPreview {
   created_at: string;
   branches?: { id: string; name: string; slug: string; address: string } | null;
   conversation_states?: ConversationState | ConversationState[] | null;
+  user_sessions?: UserSessionState | UserSessionState[] | null;
   messages?: Array<{
     content: string;
     role: string;
@@ -87,6 +97,13 @@ function pickState(
 ): ConversationState | null {
   if (!state) return null;
   return Array.isArray(state) ? state[0] ?? null : state;
+}
+
+function pickSession(
+  session?: UserSessionState | UserSessionState[] | null
+): UserSessionState | null {
+  if (!session) return null;
+  return Array.isArray(session) ? session[0] ?? null : session;
 }
 
 // --- UPDATED TYPING HERE TO FIX TS ERRORS ---
@@ -325,6 +342,7 @@ export default function ConversationsPage() {
   );
   const activeConversation = conversation ?? activePreview;
   const activeState = pickState(activeConversation?.conversation_states);
+  const activeSession = pickSession(activeConversation?.user_sessions);
   const draftLines = getDraftLines(activeState?.cart);
   const draftItemCount = draftLines.reduce((sum, item) => sum + item.qty, 0);
   const oldestLoadedIngestSeq = useMemo(() => {
@@ -430,6 +448,7 @@ export default function ConversationsPage() {
             <div className="space-y-1.5">
               {filteredConversations.map((item) => {
                 const state = pickState(item.conversation_states);
+                const session = pickSession(item.user_sessions);
                 const isActive = item.id === selectedId;
 
                 return (
@@ -489,6 +508,13 @@ export default function ConversationsPage() {
                               {formatStep(state.workflow_step)}
                             </span>
                           )}
+                          {session?.status === "human_handoff" && (
+                            <span className={clsx("rounded-md px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider",
+                              isActive ? "bg-amber-300/20 text-amber-50" : "bg-amber-100 text-amber-700"
+                            )}>
+                              Handoff
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -534,6 +560,12 @@ export default function ConversationsPage() {
                       <span className="flex items-center gap-1">
                         <Sparkles size={10} className="text-brand" /> {formatStep(activeState?.workflow_step)}
                       </span>
+                      {activeSession?.status === "human_handoff" && (
+                        <>
+                          <span>&bull;</span>
+                          <span className="text-amber-600">{activeSession.escalation_reason ?? "Human handoff active"}</span>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>

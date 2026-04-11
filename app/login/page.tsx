@@ -38,7 +38,7 @@ export default function LoginPage() {
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950 px-4 py-12 text-slate-50">
-      <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white/5 p-8 shadow-2xl backdrop-blur">
+      <div suppressHydrationWarning className="w-full max-w-md rounded-3xl border border-white/10 bg-white/5 p-8 shadow-2xl backdrop-blur">
         <p className="text-xs font-semibold uppercase tracking-[0.3em] text-orange-300">Tandoori Agent</p>
         <h1 className="mt-4 text-3xl font-bold tracking-tight">Dashboard Login</h1>
         <p className="mt-2 text-sm text-slate-300">
