@@ -25,8 +25,13 @@ type DashboardOrder = {
   conversations?: { name?: string | null } | null;
 };
 
-type DashboardConversation = {
-  id: string;
+type DashboardSummaryResponse = {
+  active: number;
+  today: number;
+  revenue: number;
+  chats: number;
+  breakdown: Record<string, number>;
+  recentOrders: DashboardOrder[];
 };
 
 export default function DashboardPage() {
@@ -41,30 +46,21 @@ export default function DashboardPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const branchQuery = selectedBranchId === "all" ? "" : `&branch_id=${encodeURIComponent(selectedBranchId)}`;
-      const [cRes, oRes] = await Promise.all([
-        fetch(`/api/conversations?limit=80${branchQuery}`, { headers: { "ngrok-skip-browser-warning": "69420" } }),
-        fetch(`/api/orders?limit=80${branchQuery}`, { headers: { "ngrok-skip-browser-warning": "69420" } })
-      ]);
-      const conversations = (await cRes.json()) as DashboardConversation[];
-      const orders = (await oRes.json()) as DashboardOrder[];
-
-      const activeTypes = ["received", "preparing", "out_for_delivery"];
-      const todayStr = new Date().toDateString();
-
-      const counts = orders.reduce<Record<string, number>>((acc, order) => {
-        acc[order.status] = (acc[order.status] || 0) + 1;
-        return acc;
-      }, {});
-
-      setStats({
-        active: orders.filter((order) => activeTypes.includes(order.status)).length,
-        today: orders.filter((order) => new Date(order.created_at).toDateString() === todayStr).length,
-        revenue: orders.reduce((accumulator, order) => accumulator + (order.status === "delivered" ? Number(order.subtotal) : 0), 0),
-        chats: conversations.length,
-        breakdown: counts
+      const branchQuery = selectedBranchId === "all" ? "" : `?branch_id=${encodeURIComponent(selectedBranchId)}`;
+      const res = await fetch(`/api/dashboard/summary${branchQuery}`, {
+        headers: { "ngrok-skip-browser-warning": "69420" },
       });
-      setRecentOrders(orders.slice(0, 8));
+      if (!res.ok) throw new Error("Failed to load dashboard summary");
+
+      const summary = (await res.json()) as DashboardSummaryResponse;
+      setStats({
+        active: summary.active,
+        today: summary.today,
+        revenue: summary.revenue,
+        chats: summary.chats,
+        breakdown: summary.breakdown,
+      });
+      setRecentOrders(summary.recentOrders ?? []);
       setLastUpdatedAt(new Date().toISOString());
     } catch (e) {
       console.error("Data fetch failed", e);
@@ -78,7 +74,10 @@ export default function DashboardPage() {
   }, [fetchData]);
 
   useEffect(() => {
-    const interval = window.setInterval(() => void fetchData(), 12000);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void fetchData();
+    }, 12000);
     return () => {
       window.clearInterval(interval);
     };

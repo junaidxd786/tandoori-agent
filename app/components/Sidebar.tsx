@@ -26,10 +26,6 @@ const baseNavItems = [
 ];
 const adminNavItems = [...baseNavItems, { href: "/dashboard/admin", label: "Admin", icon: Users }];
 
-function buildBranchQuery(branchId: string | "all") {
-  return branchId === "all" ? "" : `&branch_id=${encodeURIComponent(branchId)}`;
-}
-
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
@@ -75,8 +71,10 @@ export function Sidebar() {
 
   useEffect(() => {
     const checkNotifications = async () => {
+      if (document.visibilityState !== "visible") return;
       try {
-        const res = await fetch(`/api/conversations?limit=100${buildBranchQuery(selectedBranchId)}`, {
+        const branchQuery = selectedBranchId === "all" ? "" : `&branch_id=${encodeURIComponent(selectedBranchId)}`;
+        const res = await fetch(`/api/conversations?limit=30&unread_only=1&lite=1${branchQuery}`, {
           cache: "no-store",
           headers: { "ngrok-skip-browser-warning": "69420" }
         });

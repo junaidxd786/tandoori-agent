@@ -186,6 +186,16 @@ export function invalidateMenuCache(branchId?: string): void {
 }
 
 export async function applyMenuCatalog(branchId: string, items: MenuItem[], replaceAll = false) {
+  const { data: branch, error: branchError } = await supabaseAdmin
+    .from("branches")
+    .select("id")
+    .eq("id", branchId)
+    .maybeSingle();
+  if (branchError) throw branchError;
+  if (!branch) {
+    throw new Error("Selected branch was not found.");
+  }
+
   const sanitized = sanitizeMenuItems(items);
   if (sanitized.issues.length > 0) {
     const message = sanitized.issues.map((issue) => issue.message).join(" ");

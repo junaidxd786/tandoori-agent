@@ -16,9 +16,23 @@ export async function GET(req: NextRequest) {
   let query = supabaseAdmin
     .from("orders")
     .select(`
-      *,
+      id,
+      branch_id,
+      order_number,
+      type,
+      status,
+      subtotal,
+      delivery_fee,
+      address,
+      guests,
+      reservation_time,
+      assigned_to,
+      status_notified_at,
+      status_notification_status,
+      status_notification_error,
+      created_at,
       branches (id, name, slug),
-      order_items (*),
+      order_items (id, name, qty, price),
       conversations (phone, name)
     `)
     .order("created_at", { ascending: false });

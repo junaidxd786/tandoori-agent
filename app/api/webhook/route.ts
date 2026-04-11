@@ -701,22 +701,36 @@ async function drainConversationQueue(conversation: ConversationRow) {
 
       // Only load expensive resources for complex/menu messages
       const needsFullProcessing = messageType === "complex" || messageType === "menu_related";
-      const menuItems = needsFullProcessing ? await getMenuCatalog(conversation.branch_id) : [];
-      const menuForAI = needsFullProcessing ? await getMenuForAI(conversation.branch_id) : null;
-      const semanticMatches = needsFullProcessing ? await getSemanticMenuMatches(conversation.branch_id, nextMessage.content, 5) : [];
-
-      const recentOrder = await getRecentOrderContext(conversation.id);
-      const session = await getOrCreateUserSession(conversation.id, {
-        active_node: conversation.mode === "human" ? "human_handoff" : "cart_builder",
-        status: conversation.mode === "human" ? "human_handoff" : "active",
-        is_bot_active: conversation.mode !== "human",
-      });
+      const [
+        menuItems,
+        menuForAI,
+        semanticMatches,
+        recentOrder,
+        session,
+      ] = await Promise.all([
+        needsFullProcessing ? getMenuCatalog(conversation.branch_id) : Promise.resolve([]),
+        needsFullProcessing ? getMenuForAI(conversation.branch_id) : Promise.resolve(null),
+        messageType === "complex"
+          ? getSemanticMenuMatches(conversation.branch_id, nextMessage.content, 5)
+          : Promise.resolve([]),
+        getRecentOrderContext(conversation.id),
+        getOrCreateUserSession(conversation.id, {
+          active_node: conversation.mode === "human" ? "human_handoff" : "cart_builder",
+          status: conversation.mode === "human" ? "human_handoff" : "active",
+          is_bot_active: conversation.mode !== "human",
+        }),
+      ]);
 
       const decision = await decideTurn({
         messageText: nextMessage.content,
         state,
         menuItems,
         semanticMatches,
+        branch: {
+          id: branch.id,
+          name: branch.name,
+          address: branch.address ?? null,
+        },
         settings,
         isOpenNow,
         recentOrder,

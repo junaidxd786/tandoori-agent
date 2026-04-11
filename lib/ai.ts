@@ -10,6 +10,12 @@ const client = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY || "dummy_key_to_prevent_build_crash",
 });
 
+// Configure direct Google AI Studio client for free tier and higher token capacity
+const googleClient = process.env.GOOGLE_AI_API_KEY ? new OpenAI({
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+  apiKey: process.env.GOOGLE_AI_API_KEY,
+}) : null;
+
 
 // Simple in-memory cache for AI interpretations
 const interpretationCache = new Map<string, { result: OrderTurnInterpretation; expires: number }>();
@@ -485,15 +491,19 @@ export async function getCustomerSupportReply(
 }
 
 export async function processMenuImage(imageUrl: string) {
-  const completion = await client.chat.completions.create({
-    model: "google/gemini-2.0-flash-001",
+  // Use Google AI Studio directly if available to bypass OpenRouter credit limits
+  const targetClient = googleClient || client;
+  const targetModel = googleClient ? "gemini-2.0-flash" : "google/gemini-2.0-flash-001";
+
+  const completion = await targetClient.chat.completions.create({
+    model: targetModel,
     max_tokens: 8000,
     messages: [
       {
         role: "system",
         content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
 
-Extract every menu item visible in this image.
+Extract every menu item visible in this image. 
 
 Rules:
 1. Strip numbering from the item name.

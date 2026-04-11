@@ -91,7 +91,10 @@ export default function OrdersPage() {
   }, [loadOrders]);
 
   useEffect(() => {
-    const interval = window.setInterval(() => void loadOrders(), 12000);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void loadOrders();
+    }, 12000);
     return () => {
       window.clearInterval(interval);
     };

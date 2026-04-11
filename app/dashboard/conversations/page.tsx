@@ -311,6 +311,7 @@ export default function ConversationsPage() {
 
   useEffect(() => {
     const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
       void loadConversations(true);
       if (selectedIdRef.current) void loadConversation(selectedIdRef.current);
       if (selectedIdRef.current) void loadMessages(selectedIdRef.current);
@@ -365,7 +366,9 @@ export default function ConversationsPage() {
       if (!response.ok) throw new Error(body.error || "Failed to send message");
 
       setComposer("");
-      await Promise.all([loadMessages(selectedId), loadConversations(true), loadConversation(selectedId)]);
+      setMessages((current) => mergeAndSortMessages([...current, body as Message]));
+      void loadConversations(true);
+      void loadConversation(selectedId);
       toast.success("Message sent.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to send message.");

@@ -45,6 +45,7 @@ export async function DELETE(_: NextRequest, context: RouteContext<"/api/admin/b
     return NextResponse.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to delete branch.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = /not found/i.test(message) ? 404 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }

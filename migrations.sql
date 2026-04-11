@@ -236,6 +236,8 @@ create index if not exists idx_messages_whatsapp_msg_id on messages(whatsapp_msg
 create unique index if not exists idx_messages_whatsapp_msg_id_unique on messages(whatsapp_msg_id) where whatsapp_msg_id is not null;
 create index if not exists idx_orders_branch_created on orders(branch_id, created_at desc);
 create index if not exists idx_orders_status on orders(status);
+create index if not exists idx_orders_branch_status_created on orders(branch_id, status, created_at desc);
+create index if not exists idx_conversations_unread_branch_updated on conversations(has_unread, branch_id, updated_at desc);
 create index if not exists idx_conversation_states_conversation on conversation_states(conversation_id);
 create index if not exists idx_order_agent_turns_conversation_created on order_agent_turns(conversation_id, created_at desc);
 create index if not exists idx_order_agent_turns_message on order_agent_turns(message_id);

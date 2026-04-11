@@ -213,8 +213,54 @@ export async function updateBranch(branchId: string, input: BranchMutationInput)
 }
 
 export async function deleteBranch(branchId: string) {
-  const { error } = await supabaseAdmin.from("branches").delete().eq("id", branchId);
-  if (error) throw error;
+  const { data: existing, error: fetchError } = await supabaseAdmin
+    .from("branches")
+    .select("id, name")
+    .eq("id", branchId)
+    .maybeSingle();
+
+  if (fetchError) {
+    throw fetchError;
+  }
+
+  if (!existing) {
+    throw new Error("Branch not found.");
+  }
+
+  // Explicit cleanup before branch deletion keeps behavior deterministic even if
+  // live DB constraints differ from local schema expectations.
+  const { error: accessError } = await supabaseAdmin
+    .from("staff_branch_access")
+    .delete()
+    .eq("branch_id", branchId);
+  if (accessError) throw accessError;
+
+  const { error: profileError } = await supabaseAdmin
+    .from("staff_profiles")
+    .update({ default_branch_id: null })
+    .eq("default_branch_id", branchId);
+  if (profileError) throw profileError;
+
+  const { error: contactsError } = await supabaseAdmin
+    .from("contacts")
+    .update({ active_branch_id: null })
+    .eq("active_branch_id", branchId);
+  if (contactsError) throw contactsError;
+
+  const { error: settingsError } = await supabaseAdmin
+    .from("restaurant_settings")
+    .delete()
+    .eq("branch_id", branchId);
+  if (settingsError) throw settingsError;
+
+  const { error: deleteError } = await supabaseAdmin
+    .from("branches")
+    .delete()
+    .eq("id", branchId);
+
+  if (deleteError) {
+    throw deleteError;
+  }
 }
 
 export async function listStaffMembers(): Promise<AdminStaffSummary[]> {

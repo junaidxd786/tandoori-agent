@@ -178,6 +178,11 @@ export interface TurnContext {
   state: ConversationState;
   menuItems: MenuCatalogItem[];
   semanticMatches: SemanticMenuMatch[];
+  branch: {
+    id: string;
+    name: string;
+    address: string | null;
+  };
   settings: RestaurantSettings;
   isOpenNow: boolean;
   recentOrder: RecentOrderContext | null;
@@ -634,8 +639,17 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
 
   if (interpretation.asks_eta || interpretation.intent === "eta_question") {
     const prompt = prefersRomanUrdu
-      ? "Delivery aam tor par confirmation ke baad 30 se 45 minutes leti hai."
-      : "Delivery usually takes 30 to 45 minutes after confirmation.";
+      ? `Delivery aam tor par confirmation ke baad 30 se 45 minutes leti hai. Helpline: ${buildHelplineValue(context.settings, state)}.`
+      : `Delivery usually takes 30 to 45 minutes after confirmation. Helpline: ${buildHelplineValue(context.settings, state)}.`;
+    return replyDecision(
+      maybeAppendCheckoutPrompt(prompt, state, prefersRomanUrdu),
+      withPreferredLanguage({}, preferredLanguage),
+      trace,
+    );
+  }
+
+  if (asksBranchAddress(normalizedText) && state.workflow_step !== "awaiting_delivery_address" && isLikelyQuestionMessage(rawText)) {
+    const prompt = buildBranchAddressReply(context.branch, prefersRomanUrdu);
     return replyDecision(
       maybeAppendCheckoutPrompt(prompt, state, prefersRomanUrdu),
       withPreferredLanguage({}, preferredLanguage),
@@ -659,8 +673,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   if (asksContactDetails(normalizedText)) {
-    const contact = context.settings.phone_delivery?.trim() || context.settings.phone_dine_in?.trim() || "support line";
-    const prompt = prefersRomanUrdu ? `Contact number: ${contact}.` : `Contact number: ${contact}.`;
+    const prompt = buildBranchContactReply(context.settings, state, prefersRomanUrdu);
     return replyDecision(
       maybeAppendCheckoutPrompt(prompt, state, prefersRomanUrdu),
       withPreferredLanguage({}, preferredLanguage),
@@ -895,7 +908,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   if (removeRequests.length > 0 || matchedAdds.matched.length > 0 || qtyUpdates.length > 0) {
     const mutated = mutateCart(state.cart, matchedAdds.matched, removeRequests);
     const cartWithQtyUpdates = applyCartQtyUpdates(mutated.cart, qtyUpdates);
-    const nextState: ConversationState = {
+    const nextStateBase: ConversationState = {
       ...state,
       cart: cartWithQtyUpdates,
       workflow_step: "collecting_items",
@@ -903,6 +916,12 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
       last_presented_options: null,
       last_presented_options_at: null,
     };
+    const nextState = applyCheckoutSignalsToState({
+      state: nextStateBase,
+      interpretation,
+      rawText,
+      settings: context.settings,
+    });
 
     if (cartWithQtyUpdates.length === 0) {
       return replyDecision(
@@ -1000,15 +1019,23 @@ function handleAwaitingConfirmation(params: {
       );
     }
 
+    const nextStateBase: ConversationState = {
+      ...state,
+      cart: cartWithQtyUpdates,
+      workflow_step: "collecting_items",
+      summary_sent_at: null,
+      preferred_language: preferredLanguage,
+    };
+    const nextState = applyCheckoutSignalsToState({
+      state: nextStateBase,
+      interpretation,
+      rawText: context.messageText,
+      settings: context.settings,
+    });
+
     return buildLogisticsOrSummaryReply(
       {
-        state: {
-          ...state,
-          cart: cartWithQtyUpdates,
-          workflow_step: "collecting_items",
-          summary_sent_at: null,
-          preferred_language: preferredLanguage,
-        },
+        state: nextState,
         settings: context.settings,
         matchedAdds,
         removedItemsText: [buildRemovedItemsMessage(mutated.removed), buildQtyUpdatedItemsMessage(qtyUpdates)]
@@ -1432,17 +1459,14 @@ function expectsStructuredCheckoutInput(step: WorkflowStep): boolean {
 
 function parseOrderTypeShortcut(normalizedText: string): OrderType | null {
   if (
-    /^(delivery|order type delivery|order_type_delivery|type delivery|delivery please|delivery kar do)$/.test(
-      normalizedText,
-    )
+    /\b(order_type_delivery|order type delivery|type delivery|home delivery|delivery|deliver)\b/.test(normalizedText) &&
+    !/\b(no delivery|without delivery|dont deliver|don't deliver)\b/.test(normalizedText)
   ) {
     return "delivery";
   }
 
   if (
-    /^(dine in|dine-in|dinein|order type dine in|order_type_dine_in|type dine in|dine in please)$/.test(
-      normalizedText,
-    )
+    /\b(order_type_dine_in|order type dine in|type dine in|dine in|dine-in|dinein)\b/.test(normalizedText)
   ) {
     return "dine-in";
   }
@@ -1486,6 +1510,55 @@ function pickMenuSuggestionsForQuery(
   }
 
   return findLikelyMenuSuggestions(query, menuItems, limit).filter((item) => itemSimilarityScore(normalizeText(query), normalizeText(item.name)) >= 0.5);
+}
+
+function applyCheckoutSignalsToState(params: {
+  state: ConversationState;
+  interpretation: OrderTurnInterpretation;
+  rawText: string;
+  settings: RestaurantSettings;
+}): ConversationState {
+  const { interpretation, rawText, settings } = params;
+  const next = { ...params.state };
+  const normalizedText = normalizeText(rawText);
+  const explicitType = interpretation.order_type ?? parseOrderTypeShortcut(normalizedText);
+
+  if (explicitType === "delivery" && settings.delivery_enabled) {
+    next.order_type = "delivery";
+    next.guests = null;
+    next.reservation_time = null;
+    const address = interpretation.address ?? parseAddress(rawText);
+    if (address) {
+      next.address = address;
+    }
+  } else if (explicitType === "dine-in") {
+    next.order_type = "dine-in";
+    next.address = null;
+    const guests = interpretation.guests ?? parseGuestCount(normalizedText) ?? next.guests;
+    const reservationTime =
+      parseReservationTime(interpretation.reservation_time ?? rawText, {
+        opening_time: settings.opening_time,
+        closing_time: settings.closing_time,
+      }) ?? next.reservation_time;
+    next.guests = guests ?? null;
+    next.reservation_time = reservationTime ?? null;
+  } else if (next.order_type === "delivery") {
+    const address = interpretation.address ?? parseAddress(rawText);
+    if (address) {
+      next.address = address;
+    }
+  } else if (next.order_type === "dine-in") {
+    const guests = interpretation.guests ?? parseGuestCount(normalizedText) ?? next.guests;
+    const reservationTime =
+      parseReservationTime(interpretation.reservation_time ?? rawText, {
+        opening_time: settings.opening_time,
+        closing_time: settings.closing_time,
+      }) ?? next.reservation_time;
+    next.guests = guests ?? null;
+    next.reservation_time = reservationTime ?? null;
+  }
+
+  return next;
 }
 
 function scoreSignals(text: string, words: string[]): number {
@@ -1558,7 +1631,64 @@ function asksOpeningHours(normalizedText: string): boolean {
 }
 
 function asksContactDetails(normalizedText: string): boolean {
-  return /\b(phone|number|contact|call)\b/.test(normalizedText);
+  return /\b(phone|number|contact|call|helpline|help line|support|hotline)\b/.test(normalizedText);
+}
+
+function asksBranchAddress(normalizedText: string): boolean {
+  return /\b(address|location|kahan|kidhar|where)\b/.test(normalizedText);
+}
+
+function buildBranchAddressReply(
+  branch: TurnContext["branch"],
+  romanUrdu: boolean,
+): string {
+  if (!branch.address?.trim()) {
+    return romanUrdu
+      ? `Maazrat, ${branch.name} ka address abhi update nahi hai.`
+      : `Sorry, ${branch.name} address is not configured yet.`;
+  }
+
+  return romanUrdu
+    ? `${branch.name} ka address: ${branch.address}`
+    : `${branch.name} address: ${branch.address}`;
+}
+
+function buildHelplineValue(settings: RestaurantSettings, state: ConversationState): string {
+  if (state.order_type === "delivery") {
+    return settings.phone_delivery?.trim() || settings.phone_dine_in?.trim() || "support line";
+  }
+
+  if (state.order_type === "dine-in") {
+    return settings.phone_dine_in?.trim() || settings.phone_delivery?.trim() || "support line";
+  }
+
+  return settings.phone_delivery?.trim() || settings.phone_dine_in?.trim() || "support line";
+}
+
+function buildBranchContactReply(
+  settings: RestaurantSettings,
+  state: ConversationState,
+  romanUrdu: boolean,
+): string {
+  const deliveryPhone = settings.phone_delivery?.trim() || null;
+  const dineInPhone = settings.phone_dine_in?.trim() || null;
+
+  if (state.order_type === "delivery" && deliveryPhone) {
+    return romanUrdu ? `Delivery helpline: ${deliveryPhone}` : `Delivery helpline: ${deliveryPhone}`;
+  }
+
+  if (state.order_type === "dine-in" && dineInPhone) {
+    return romanUrdu ? `Dine-in helpline: ${dineInPhone}` : `Dine-in helpline: ${dineInPhone}`;
+  }
+
+  if (deliveryPhone && dineInPhone && deliveryPhone !== dineInPhone) {
+    return romanUrdu
+      ? `Delivery helpline: ${deliveryPhone}. Dine-in helpline: ${dineInPhone}.`
+      : `Delivery helpline: ${deliveryPhone}. Dine-in helpline: ${dineInPhone}.`;
+  }
+
+  const contact = deliveryPhone || dineInPhone || "support line";
+  return romanUrdu ? `Contact number: ${contact}.` : `Contact number: ${contact}.`;
 }
 
 function attemptsCheckoutProgression(
