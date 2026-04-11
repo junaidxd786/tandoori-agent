@@ -741,7 +741,7 @@ async function drainConversationQueue(conversation: ConversationRow) {
           ? updatedState.last_presented_options
           : null;
         const interactiveList =
-          decision.interactiveList ??
+          ("interactiveList" in decision ? decision.interactiveList : null) ??
           (optionsFromState && optionsFromState.length > 0
             ? buildInteractiveListForPresentedOptions(
               optionsFromState,
