@@ -32,6 +32,17 @@ function getInitialBranchId(session: DashboardSession): SelectedBranchId {
   return session.defaultBranchId ?? session.allowedBranches[0]?.id ?? "all";
 }
 
+function resolveStoredBranchId(session: DashboardSession, rawValue: string | null): SelectedBranchId | null {
+  if (!rawValue) return null;
+
+  if (rawValue === "all") {
+    return session.role === "admin" ? "all" : null;
+  }
+
+  const isAllowed = session.allowedBranches.some((branch) => branch.id === rawValue);
+  return isAllowed ? rawValue : null;
+}
+
 export function DashboardProvider({
   session,
   children,
@@ -40,7 +51,15 @@ export function DashboardProvider({
   children: React.ReactNode;
 }) {
   const router = useRouter();
-  const [selectedBranchId, setSelectedBranchIdState] = useState<SelectedBranchId>(() => getInitialBranchId(session));
+  const [selectedBranchId, setSelectedBranchIdState] = useState<SelectedBranchId>(() => {
+    const fallbackBranchId = getInitialBranchId(session);
+    if (typeof window === "undefined") {
+      return fallbackBranchId;
+    }
+
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    return resolveStoredBranchId(session, stored) ?? fallbackBranchId;
+  });
 
   const selectedBranch = useMemo(() => {
     if (selectedBranchId === "all") return null;

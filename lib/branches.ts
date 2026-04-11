@@ -93,11 +93,15 @@ export function getBranchSelectionPrompt(branches: BranchSummary[], prefersRoman
 }
 
 export function findBranchSelection(input: string, branches: BranchSummary[]): BranchSummary | null {
-  const normalized = normalizeBranchValue(input);
+  const raw = input.trim();
+  const normalized = normalizeBranchValue(raw);
   if (!normalized) return null;
 
+  const byId = branches.find((branch) => branch.id.toLowerCase() === raw.toLowerCase());
+  if (byId) return byId;
+
   // Handle interactive list selection
-  const optionMatch = normalized.match(/^branch_option_(\d+)$/);
+  const optionMatch = raw.match(/^branch[_\s-]?option[_\s-]?(\d+)$/i);
   if (optionMatch) {
     const index = Number.parseInt(optionMatch[1], 10) - 1;
     if (index >= 0 && index < branches.length) {

@@ -130,6 +130,8 @@ This repo now includes a root [`.mcp.json`](/C:/Users/PMLS/OneDrive/Desktop/tand
 - `supabase` pointed at this project's Supabase MCP endpoint
 - `next-devtools` for the Next.js 16 dev-server MCP bridge
 
+For Supabase MCP to authenticate, make sure the process launching Codex has `SUPABASE_ACCESS_TOKEN` set to a Supabase personal access token for your account. The MCP config sends it as a bearer token header.
+
 Run the app locally with:
 
 ```bash
