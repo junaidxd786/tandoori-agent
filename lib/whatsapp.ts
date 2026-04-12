@@ -127,11 +127,15 @@ export async function sendWhatsAppInteractiveList(
     throw new Error("Interactive list requires at least one row.");
   }
 
-  const rows = payload.rows.slice(0, 10).map((row) => ({
-    id: String(row.id).slice(0, 200),
-    title: String(row.title).slice(0, 24),
-    ...(row.description ? { description: String(row.description).slice(0, 72) } : {}),
-  }));
+  const rows = payload.rows.slice(0, 10).map((row) => {
+    const title = String(row.title);
+    const truncatedTitle = title.length > 24 ? title.slice(0, 21) + "..." : title;
+    return {
+      id: String(row.id).slice(0, 200),
+      title: truncatedTitle,
+      ...(row.description ? { description: String(row.description).slice(0, 72) } : {}),
+    };
+  });
 
   const body = payload.body.slice(0, 1024);
   const buttonText = payload.buttonText.slice(0, 20);

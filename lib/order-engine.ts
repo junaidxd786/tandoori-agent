@@ -2070,11 +2070,15 @@ function buildCategoryListReply(menuItems: MenuCatalogItem[], romanUrdu: boolean
         : "Choose a category from the menu.",
       buttonText: romanUrdu ? "Select Category" : "Select Category",
       sectionTitle: romanUrdu ? "Categories" : "Categories",
-      rows: interactiveCategories.map((category, index) => ({
-        id: `category_option_${index + 1}`,
-        title: category,
-        description: undefined,
-      })),
+      rows: interactiveCategories.map((category, index) => {
+        // Truncate category names for WhatsApp interactive list (24 char limit)
+        const truncatedTitle = category.length > 24 ? category.slice(0, 21) + "..." : category;
+        return {
+          id: `category_option_${index + 1}`,
+          title: truncatedTitle,
+          description: undefined,
+        };
+      }),
     };
   }
 

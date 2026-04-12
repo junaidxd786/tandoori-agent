@@ -498,7 +498,32 @@ export async function processMenuImage(imageUrl: string) {
   const completion = await createMenuCompletion(targetClient, targetModel, imageUrl);
 
   const raw = completion.choices[0]?.message?.content ?? "{}";
-  const parsed = JSON.parse(raw) as { items?: unknown[] } | unknown[];
+
+  // Robust JSON parsing with error handling
+  let parsed;
+  try {
+    parsed = JSON.parse(raw) as { items?: unknown[] } | unknown[];
+  } catch (parseError) {
+    console.error("[menu/process] JSON parse error:", parseError);
+    console.error("[menu/process] Raw response:", raw.slice(0, 500) + (raw.length > 500 ? "..." : ""));
+
+    // Try to fix common JSON issues
+    const fixedJson = fixMalformedJson(raw);
+    if (fixedJson) {
+      try {
+        parsed = JSON.parse(fixedJson);
+        console.log("[menu/process] Successfully fixed malformed JSON");
+      } catch (fixError) {
+        console.error("[menu/process] Failed to fix JSON:", fixError);
+        const errorMessage = parseError instanceof Error ? parseError.message : String(parseError);
+        throw new Error(`AI returned malformed JSON: ${errorMessage}`);
+      }
+    } else {
+      const errorMessage = parseError instanceof Error ? parseError.message : String(parseError);
+      throw new Error(`AI returned malformed JSON: ${errorMessage}`);
+    }
+  }
+
   if (Array.isArray(parsed)) return parsed;
   if (Array.isArray(parsed.items)) return parsed.items;
 
@@ -508,80 +533,103 @@ export async function processMenuImage(imageUrl: string) {
   throw new Error("The AI returned an unexpected menu format.");
 }
 
-async function createMenuCompletion(client: any, model: string, imageUrl: string) {
-  try {
-    return await client.chat.completions.create({
-      model,
-      max_tokens: 2000,
-      messages: [
-        {
-          role: "system",
-          content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
+// Helper function to fix common JSON malformations
+function fixMalformedJson(jsonString: string): string | null {
+  if (!jsonString || jsonString.trim() === "") return null;
 
-Extract every menu item visible in this image.
+  let fixed = jsonString.trim();
 
-Rules:
-1. Strip numbering from the item name.
-2. Keep portion or size details when present.
-3. Preserve the visible category heading when possible.
-4. Return price as a plain number with no currency symbol.
-5. If price is unreadable, return null. Never guess.
-6. Return JSON only in this shape: { "items": [ { "name": "...", "price": 850, "category": "..." } ] }`,
-        },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "Parse this menu image into JSON." },
-            { type: "image_url", image_url: { url: imageUrl } },
-          ],
-        },
-      ],
-      response_format: { type: "json_object" },
-    });
-  } catch (error: any) {
-    // Handle 429 rate limit errors or other failures by trying the other client
-    if (error?.status === 429 || error?.code === 'ECONNREFUSED' || error?.message?.includes('rate limit')) {
-      console.warn("[menu/process] Primary client failed, trying fallback client");
-      const isUsingGoogle = client === googleClient;
-      const fallbackClient = isUsingGoogle ? openRouterClient : googleClient; // If using Google, fallback to OpenRouter, else try Google
-      const fallbackModel = isUsingGoogle ? "google/gemini-2.0-flash-001" : "gemini-2.0-flash";
+  // Remove any trailing commas before closing braces/brackets
+  fixed = fixed.replace(/,(\s*[}\]])/g, '$1');
 
-      if (fallbackClient) {
-        try {
-          return await fallbackClient.chat.completions.create({
-            model: fallbackModel,
-            max_tokens: 2000,
-            messages: [
-              {
-                role: "system",
-                content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
-
-Extract every menu item visible in this image.
-
-Rules:
-1. Strip numbering from the item name.
-2. Keep portion or size details when present.
-3. Preserve the visible category heading when possible.
-4. Return price as a plain number with no currency symbol.
-5. If price is unreadable, return null. Never guess.
-6. Return JSON only in this shape: { "items": [ { "name": "...", "price": 850, "category": "..." } ] }`,
-              },
-              {
-                role: "user",
-                content: [
-                  { type: "text", text: "Parse this menu image into JSON." },
-                  { type: "image_url", image_url: { url: imageUrl } },
-                ],
-              },
-            ],
-            response_format: { type: "json_object" },
-          });
-        } catch (fallbackError) {
-          console.error("[menu/process] Fallback client also failed:", fallbackError);
-          throw fallbackError;
-        }
-      }
+  // Fix unterminated strings by adding closing quotes
+  // This is a simple heuristic - look for strings that start with quotes but don't end with quotes
+  const lines = fixed.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const quoteCount = (line.match(/"/g) || []).length;
+    if (quoteCount % 2 === 1) {
+      // Odd number of quotes - likely unterminated string
+      // Add closing quote at end of line
+      lines[i] = line + '"';
     }
-    throw error;
   }
+  fixed = lines.join('\n');
+
+  // Try to close unterminated objects/arrays
+  const openBraces = (fixed.match(/{/g) || []).length;
+  const closeBraces = (fixed.match(/}/g) || []).length;
+  const openBrackets = (fixed.match(/\[/g) || []).length;
+  const closeBrackets = (fixed.match(/\]/g) || []).length;
+
+  // Add missing closing braces
+  for (let i = 0; i < openBraces - closeBraces; i++) {
+    fixed += '}';
+  }
+
+  // Add missing closing brackets
+  for (let i = 0; i < openBrackets - closeBrackets; i++) {
+    fixed += ']';
+  }
+
+  // Validate the fixed JSON
+  try {
+    JSON.parse(fixed);
+    return fixed;
+  } catch {
+    return null;
+  }
+}
+
+async function createMenuCompletion(client: any, model: string, imageUrl: string) {
+  const clients = [
+    { client, model, name: "primary" },
+    { client: googleClient, model: "gemini-2.0-flash", name: "google" },
+    { client: openRouterClient, model: "google/gemini-2.0-flash-001", name: "openrouter" },
+  ].filter(c => c.client); // Only include clients that exist
+
+  for (const { client: currentClient, model: currentModel, name } of clients) {
+    try {
+      console.log(`[menu/process] Trying ${name} client with model ${currentModel}`);
+      const completion = await currentClient.chat.completions.create({
+        model: currentModel,
+        max_tokens: 4000, // Increased from 2000 to handle larger responses
+        messages: [
+          {
+            role: "system",
+            content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
+
+Extract every menu item visible in this image.
+
+Rules:
+1. Strip numbering from the item name.
+2. Keep portion or size details when present.
+3. Preserve the visible category heading when possible, but keep category names concise (under 24 characters when possible).
+4. Return price as a plain number with no currency symbol.
+5. If price is unreadable, return null. Never guess.
+6. Return JSON only in this shape: { "items": [ { "name": "...", "price": 850, "category": "..." } ] }`,
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Parse this menu image into JSON." },
+              { type: "image_url", image_url: { url: imageUrl } },
+            ],
+          },
+        ],
+        response_format: { type: "json_object" },
+      });
+
+      return completion;
+    } catch (error: any) {
+      console.warn(`[menu/process] ${name} client failed:`, error.message);
+      if (name === "openrouter" && clients.length === 1) {
+        // If this is the last client, rethrow the error
+        throw error;
+      }
+      // Continue to next client
+    }
+  }
+
+  throw new Error("All AI clients failed to process the menu image");
 }
