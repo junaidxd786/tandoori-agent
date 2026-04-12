@@ -914,7 +914,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
 
   const availabilityQuery = extractItemAvailabilityQuery(normalizedText);
   if (availabilityQuery) {
-    const itemSuggestions = findLikelyMenuSuggestions(availabilityQuery, menuItems, 8);
+    const itemSuggestions = findLikelyMenuSuggestions(availabilityQuery, menuItems, 12); // Increased limit for availability queries
     if (itemSuggestions.length > 0) {
       return replyDecision(
         buildItemMatchesReply(availabilityQuery, itemSuggestions, prefersRomanUrdu),
@@ -1788,10 +1788,15 @@ function extractItemAvailabilityQuery(normalizedText: string): string | null {
   const cleaned = normalizedText.replace(/\s+/g, " ").trim();
   if (!cleaned) return null;
 
-  const match = cleaned.match(/^(.+?)\s+(hai|available|milta|milti|milta hai|milti hai)\??$/);
-  if (!match) return null;
+  // Match patterns like "ice cream hai", "do you have ice cream", "ice cream available", etc.
+  let match = cleaned.match(/^(.+?)\s+(hai|available|milta|milti|milta hai|milti hai)\??$/);
+  let query = match ? match[1].trim() : null;
 
-  const query = match[1].trim();
+  if (!query) {
+    match = cleaned.match(/^(do you have|have you got|is there|got any)\s+(.+?)\??$/i);
+    query = match ? match[2].trim() : null;
+  }
+
   if (!query || query.length < 3) return null;
   if (/(menu|category|categories|delivery|dine in|dinein)/.test(query)) return null;
   return query;
@@ -2283,13 +2288,13 @@ function buildUnknownItemReplyData(
 ): { text: string; selectableItems: MenuCatalogItem[] } {
   const normalizedUnknown = normalizeText(unknown.join(" "));
   const semanticCandidatePool = semanticMatches.filter((item) => (item.similarity ?? 0) >= 0.62);
-  const lexicalCandidatePool = findLikelyMenuSuggestions(unknown.join(" "), menuItems, 8).filter((item) => {
+  const lexicalCandidatePool = findLikelyMenuSuggestions(unknown.join(" "), menuItems, 12).filter((item) => { // Increased limit
     const score = itemSimilarityScore(normalizedUnknown, normalizeText(item.name));
-    return score >= 0.5;
+    return score >= 0.3; // Lowered threshold
   });
   const candidatePool = semanticCandidatePool.length > 0 ? semanticCandidatePool : lexicalCandidatePool;
   const selectableItems = candidatePool
-    .slice(0, 6)
+    .slice(0, 10) // Increased from 6 to 10
     .map((item) => ({
       id: item.id,
       name: item.name,
@@ -3128,6 +3133,37 @@ function itemSimilarityScore(left: string, right: string): number {
 
 function findLikelyMenuSuggestions(text: string, menuItems: MenuCatalogItem[], limit = 3): MenuCatalogItem[] {
   const normalized = normalizeText(text);
+  const queryTokens = normalized.split(/\s+/).filter(token => token.length > 1);
+
+  // First, find items that contain all the query terms
+  const containingItems = menuItems.filter((item) => {
+    const normalizedItem = normalizeText(item.name);
+    return queryTokens.every(token => normalizedItem.includes(token));
+  });
+
+  if (containingItems.length > 0) {
+    // Return all containing items, up to the limit
+    return containingItems.slice(0, limit);
+  }
+
+  // Fallback: find items that contain any of the query terms
+  const partialMatches = menuItems.filter((item) => {
+    const normalizedItem = normalizeText(item.name);
+    return queryTokens.some(token => normalizedItem.includes(token) && token.length > 2);
+  });
+
+  if (partialMatches.length > 0) {
+    return partialMatches
+      .map(item => ({
+        item,
+        score: queryTokens.filter(token => normalizeText(item.name).includes(token)).length
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map(entry => entry.item);
+  }
+
+  // Fallback to similarity scoring
   return menuItems
     .map((item) => {
       const normalizedItem = normalizeText(item.name);
@@ -3139,7 +3175,7 @@ function findLikelyMenuSuggestions(text: string, menuItems: MenuCatalogItem[], l
         ),
       };
     })
-    .filter((entry) => entry.score >= 0.35)
+    .filter((entry) => entry.score >= 0.25) // Lowered threshold for better matching
     .sort((left, right) => right.score - left.score)
     .slice(0, limit)
     .map((entry) => entry.item);
