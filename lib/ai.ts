@@ -5,7 +5,7 @@ import type { SemanticMenuMatch } from "./semantic-menu";
 import type { LanguagePreference, MenuCatalogItem, OrderType, WorkflowStep } from "./order-engine";
 import type { RestaurantSettings } from "./settings";
 
-const client = new OpenAI({
+const openRouterClient = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
   apiKey: process.env.OPENROUTER_API_KEY || "dummy_key_to_prevent_build_crash",
 });
@@ -306,7 +306,7 @@ async function repairOrderInterpretation(
   input: OrderTurnInterpretationInput,
   error: z.ZodError,
 ): Promise<OrderTurnInterpretation | null> {
-    const completion = await client.chat.completions.create({
+    const completion = await openRouterClient.chat.completions.create({
       model: process.env.ORDER_AGENT_NLU_MODEL || "openrouter/auto",
       temperature: 0,
       max_tokens: Number(process.env.ORDER_AGENT_NLU_MAX_TOKENS) || 256,
@@ -349,7 +349,7 @@ export async function getOrderTurnInterpretation(
   }
 
   try {
-    const completion = await client.chat.completions.create({
+    const completion = await openRouterClient.chat.completions.create({
       model: process.env.ORDER_AGENT_NLU_MODEL || "openrouter/auto",
       temperature: 0.1,
       max_tokens: Number(process.env.ORDER_AGENT_NLU_MAX_TOKENS) || 256,
@@ -468,7 +468,7 @@ export async function getCustomerSupportReply(
     }
   }
 
-  const completion = await client.chat.completions.create({
+  const completion = await openRouterClient.chat.completions.create({
     model: "openrouter/auto",
     max_tokens: 400,
     messages,
@@ -492,7 +492,7 @@ export async function getCustomerSupportReply(
 
 export async function processMenuImage(imageUrl: string) {
   // Use Google AI Studio directly if available to bypass OpenRouter credit limits
-  const targetClient = googleClient || client;
+  const targetClient = googleClient || openRouterClient;
   const targetModel = googleClient ? "gemini-2.0-flash" : "google/gemini-2.0-flash-001";
 
   const completion = await createMenuCompletion(targetClient, targetModel, imageUrl);
@@ -539,17 +539,22 @@ Rules:
       response_format: { type: "json_object" },
     });
   } catch (error: any) {
-    // Handle 429 rate limit errors by retrying with lower token budget
-    if (error?.status === 429) {
-      console.warn("[menu/process] Rate limited, retrying with lower token budget");
-      try {
-        return await client.chat.completions.create({
-          model,
-          max_tokens: 1000, // Reduced budget for retry
-          messages: [
-            {
-              role: "system",
-              content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
+    // Handle 429 rate limit errors or other failures by trying the other client
+    if (error?.status === 429 || error?.code === 'ECONNREFUSED' || error?.message?.includes('rate limit')) {
+      console.warn("[menu/process] Primary client failed, trying fallback client");
+      const isUsingGoogle = client === googleClient;
+      const fallbackClient = isUsingGoogle ? openRouterClient : googleClient; // If using Google, fallback to OpenRouter, else try Google
+      const fallbackModel = isUsingGoogle ? "google/gemini-2.0-flash-001" : "gemini-2.0-flash";
+
+      if (fallbackClient) {
+        try {
+          return await fallbackClient.chat.completions.create({
+            model: fallbackModel,
+            max_tokens: 2000,
+            messages: [
+              {
+                role: "system",
+                content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
 
 Extract every menu item visible in this image.
 
@@ -560,20 +565,21 @@ Rules:
 4. Return price as a plain number with no currency symbol.
 5. If price is unreadable, return null. Never guess.
 6. Return JSON only in this shape: { "items": [ { "name": "...", "price": 850, "category": "..." } ] }`,
-            },
-            {
-              role: "user",
-              content: [
-                { type: "text", text: "Parse this menu image into JSON." },
-                { type: "image_url", image_url: { url: imageUrl } },
-              ],
-            },
-          ],
-          response_format: { type: "json_object" },
-        });
-      } catch (retryError) {
-        console.error("[menu/process] Retry also failed:", retryError);
-        throw retryError;
+              },
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: "Parse this menu image into JSON." },
+                  { type: "image_url", image_url: { url: imageUrl } },
+                ],
+              },
+            ],
+            response_format: { type: "json_object" },
+          });
+        } catch (fallbackError) {
+          console.error("[menu/process] Fallback client also failed:", fallbackError);
+          throw fallbackError;
+        }
       }
     }
     throw error;
