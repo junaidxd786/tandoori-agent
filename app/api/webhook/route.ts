@@ -63,7 +63,12 @@ function shouldResumeBotFromHumanMessage(content: string): boolean {
     normalized.includes("bot can handle")
   );
 }
-
+function shouldRunSemanticLookup(content: string): boolean {
+  const normalized = content.toLowerCase().trim();
+  if (normalized.length < 4) return false;
+  if (/^(ok|okay|yes|no|han|haan|nahi|menu|\d{1,2})$/.test(normalized)) return false;
+  return /\p{L}/u.test(normalized);
+}
 type IncomingWhatsAppMessage = {
   id: string;
   from: string;
@@ -208,6 +213,7 @@ async function processWebhook(body: unknown) {
   if (events.length === 0) return;
 
   const branches = await getActiveBranches();
+  const menuReadyBranches = await filterBranchesWithAvailableMenu(branches);
   const agentConversations = new Map<string, ConversationRow>();
 
   for (const event of events) {
@@ -226,14 +232,14 @@ async function processWebhook(body: unknown) {
 
       if (!incomingContent) {
         if (message.type !== "reaction") {
-          await sendBranchSelectionMessage(message.from, branches, prefersRomanUrdu);
+          await sendBranchSelectionMessage(message.from, menuReadyBranches, prefersRomanUrdu);
         }
         continue;
       }
 
-      const selectedBranch = findBranchSelection(incomingContent, branches);
+      const selectedBranch = findBranchSelection(incomingContent, menuReadyBranches);
       if (!selectedBranch) {
-        await sendBranchSelectionMessage(message.from, branches, prefersRomanUrdu);
+        await sendBranchSelectionMessage(message.from, menuReadyBranches, prefersRomanUrdu);
         continue;
       }
 
@@ -343,19 +349,21 @@ async function processWebhook(body: unknown) {
         preferred_language: inferLanguagePreference(content, state.preferred_language),
       });
       await setActiveBranch(contact.id, null);
-      const interactiveList = buildInteractiveListForBranches(branches, state.preferred_language === "roman_urdu");
+      const interactiveList = buildInteractiveListForBranches(menuReadyBranches, state.preferred_language === "roman_urdu");
       const branchFlow = buildFlowMessageForAgentReply({
         context: "branch",
         conversationId: conversation.id,
         prefersRomanUrdu: state.preferred_language === "roman_urdu",
         workflowStep: "awaiting_branch_selection",
-        branches,
-        body: interactiveList ? interactiveList.body : getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
+        branches: menuReadyBranches,
+        body: interactiveList
+          ? interactiveList.body
+          : getBranchSelectionPrompt(menuReadyBranches, state.preferred_language === "roman_urdu"),
       });
       await sendAndPersistAssistantMessage(
         conversation.id,
         message.from,
-        interactiveList ? interactiveList.body : getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
+        interactiveList ? interactiveList.body : getBranchSelectionPrompt(menuReadyBranches, state.preferred_language === "roman_urdu"),
         interactiveList,
         branchFlow,
       );
@@ -375,7 +383,7 @@ async function processWebhook(body: unknown) {
           mode: "agent",
           intent: null,
           lastUserMessage: content,
-          lastAssistantReply: getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
+          lastAssistantReply: getBranchSelectionPrompt(menuReadyBranches, state.preferred_language === "roman_urdu"),
           forceNode: "branch_selection",
         }),
       );
@@ -654,6 +662,11 @@ async function drainConversationQueue(conversation: ConversationRow) {
     if (!branch) {
       throw new Error(`Missing branch ${conversation.branch_id} for conversation ${conversation.id}`);
     }
+ let settings = await getRestaurantSettings(conversation.branch_id);
+    let settingsLoadedAt = Date.now();
+    let isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
+    let cachedMenuItems: MenuCatalogItem[] | null = null;
+    let menuLoadedAt = 0;
 
     while (true) {
       const state = await getOrCreateConversationState(conversation.id);
@@ -692,22 +705,29 @@ async function drainConversationQueue(conversation: ConversationRow) {
         continue;
       }
 
-      const settings = await getRestaurantSettings(conversation.branch_id);
-      const isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
-
+      if (Date.now() - settingsLoadedAt > 60_000) {
+        settings = await getRestaurantSettings(conversation.branch_id);
+        settingsLoadedAt = Date.now();
+        isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
+      }
       // Detect message type for optimization
       const messageType = detectMessageType(nextMessage.content.toLowerCase().trim());
 
       // Only load expensive resources for complex/menu messages
       const needsFullProcessing = messageType === "complex" || messageType === "menu_related";
+      if (Date.now() - settingsLoadedAt > 60_000) {
+        settings = await getRestaurantSettings(conversation.branch_id);
+        settingsLoadedAt = Date.now();
+        isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
+      }
       const shouldHydrateSession = !(messageType === "greeting" || messageType === "acknowledgment");
       const [
         menuItems,
         semanticMatches,
         session,
       ] = await Promise.all([
-        needsFullProcessing ? getMenuCatalog(conversation.branch_id) : Promise.resolve([]),
-        messageType === "complex"
+        needsFullProcessing ? Promise.resolve(cachedMenuItems ?? []) : Promise.resolve([]),
+        messageType === "complex" && shouldRunSemanticLookup(nextMessage.content)
           ? getSemanticMenuMatches(conversation.branch_id, nextMessage.content, 5)
           : Promise.resolve([]),
         shouldHydrateSession
@@ -718,6 +738,66 @@ async function drainConversationQueue(conversation: ConversationRow) {
             })
           : Promise.resolve(getDefaultUserSession(conversation.id)),
       ]);
+
+      if (needsFullProcessing && menuItems.length === 0) {
+        const prefersRomanUrdu = (state.preferred_language ?? "english") === "roman_urdu";
+        const activeBranches = await getActiveBranches();
+        const menuReadyBranches = await filterBranchesWithAvailableMenu(activeBranches);
+        await setActiveBranch(conversation.contact_id, null);
+        const resetState = {
+          ...getDefaultConversationState(conversation.id),
+          workflow_step: "awaiting_branch_selection" as const,
+          preferred_language: state.preferred_language,
+        };
+        await updateConversationState(state, resetState);
+
+        const reason = prefersRomanUrdu
+          ? "Lagta hai is branch ka menu abhi set nahi hai. Pehle branch select kar lein."
+          : "It looks like this branch menu isn't set up yet. Please choose your branch first.";
+        const list = buildInteractiveListForBranches(menuReadyBranches, prefersRomanUrdu);
+        const interactiveList = list ? { ...list, body: `${reason}\n\n${list.body}` } : null;
+        const replyText = interactiveList
+          ? interactiveList.body
+          : `${reason}\n\n${getBranchSelectionPrompt(menuReadyBranches, prefersRomanUrdu)}`;
+        const branchFlow = buildFlowMessageForAgentReply({
+          context: "branch",
+          conversationId: conversation.id,
+          prefersRomanUrdu,
+          workflowStep: "awaiting_branch_selection",
+          branches: menuReadyBranches,
+          body: replyText,
+        });
+        await sendAndPersistAssistantMessage(
+          conversation.id,
+          conversation.phone,
+          replyText,
+          interactiveList,
+          branchFlow,
+        );
+        await markMessageProcessed(
+          state,
+          nextMessage.whatsapp_msg_id ?? nextMessage.id,
+          nextMessage.created_at,
+          nextMessage.ingest_seq,
+        );
+        await updateUserSession(
+          conversation.id,
+          buildSessionUpdate({
+            session,
+            stateBefore: state,
+            stateAfter: parseConversationState({
+              ...resetState,
+              conversation_id: conversation.id,
+            }),
+            mode: "agent",
+            intent: null,
+            lastUserMessage: nextMessage.content,
+            lastAssistantReply: replyText,
+            forceNode: "branch_selection",
+          }),
+        );
+        continue;
+      }
 
       const decision = await decideTurn({
         messageText: nextMessage.content,
@@ -1484,6 +1564,28 @@ async function sendBranchSelectionMessage(phone: string, branches: BranchSummary
   } else {
     await sendWhatsAppMessage(phone, getBranchSelectionPrompt(branches, prefersRomanUrdu));
   }
+}
+
+async function filterBranchesWithAvailableMenu(branches: BranchSummary[]): Promise<BranchSummary[]> {
+  if (!Array.isArray(branches) || branches.length === 0) return [];
+
+  const branchIds = branches.map((branch) => branch.id).filter(Boolean);
+  if (branchIds.length === 0) return branches;
+
+  const { data, error } = await supabaseAdmin
+    .from("menu_items")
+    .select("branch_id")
+    .in("branch_id", branchIds)
+    .eq("is_available", true);
+
+  if (error) {
+    console.warn("[branches] Failed to check menu availability per-branch:", error);
+    return branches;
+  }
+
+  const availableBranches = new Set<string>((data ?? []).map((row) => row.branch_id).filter(Boolean));
+  const filtered = branches.filter((branch) => availableBranches.has(branch.id));
+  return filtered.length > 0 ? filtered : branches;
 }
 
 function buildInteractiveFallbackText(payload: {

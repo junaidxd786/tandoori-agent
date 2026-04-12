@@ -34,10 +34,11 @@ export function detectMessageType(normalizedText: string): MessageType {
     return "status_request";
   }
 
-  // Menu related - check for food items, quantities, or menu keywords
-  if (/\b(menu|item|dish|food|drink|beverage|price|cost|available|category)\b/i.test(normalizedText) ||
-      /\d+\s*(piece|pcs|kg|g|liter|l|ml|cup|plate|bowl)/i.test(normalizedText) ||
-      normalizedText.length > 50) { // Longer messages likely contain menu items
+  // Menu related - avoid classifying every long sentence as menu intent.
+  if (
+      /\b(menu|item|dish|food|drink|beverage|price|cost|available|category|biryani|karahi|bbq|burger|pizza|roll|fries)\b/i.test(normalizedText) ||
+      /\d+\s*(piece|pcs|kg|g|liter|l|ml|cup|plate|bowl)/i.test(normalizedText)
+  ) {
     return "menu_related";
   }
 
@@ -280,6 +281,32 @@ const NUMBER_WORDS: Record<string, number> = {
   ath: 8,
   das: 10,
 };
+
+const MENU_TOKEN_STOP_WORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "please",
+  "pls",
+  "with",
+  "without",
+  "and",
+  "or",
+  "my",
+  "for",
+  "item",
+  "items",
+  "dish",
+  "food",
+  "menu",
+  "order",
+  "add",
+  "remove",
+  "qty",
+  "quantity",
+]);
+
+const PRESENTED_OPTIONS_TTL_MS = 20 * 60 * 1000;
 
 const ADDRESS_HINTS = [
   "street",
@@ -843,6 +870,27 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   if (
     state.last_presented_options &&
     state.last_presented_options.length > 0 &&
+    !isPresentedOptionsFresh(state) &&
+    isLikelySelectionCommand(normalizedText)
+  ) {
+    return replyDecision(
+      prefersRomanUrdu
+        ? "Pichli options expire ho chuki hain. *menu* likhein, main fresh list bhej deta hoon."
+        : "Those previously shown options have expired. Send *menu* and I’ll share a fresh list.",
+      withPreferredLanguage(
+        {
+          last_presented_options: null,
+          last_presented_options_at: null,
+        },
+        preferredLanguage,
+      ),
+      trace,
+    );
+  }
+
+  if (
+    state.last_presented_options &&
+    state.last_presented_options.length > 0 &&
     !isLikelySelectionCommand(normalizedText) &&
     !findPresentedOptionByDirectValue(rawText, state.last_presented_options) &&
     isSearchLikeDisambiguationMessage(normalizedText)
@@ -952,7 +1000,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     );
   }
 
-  if (state.last_presented_options && state.last_presented_options.length > 0) {
+  if (state.last_presented_options && state.last_presented_options.length > 0 && isPresentedOptionsFresh(state)) {
     const directSelection = findPresentedOptionByDirectValue(rawText, state.last_presented_options);
     if (directSelection) {
       matchedAdds.matched.push({
@@ -1552,6 +1600,34 @@ function normalizeCompact(value: string): string {
   return normalizeText(value).replace(/\s+/g, "");
 }
 
+function tokenizeForMenuMatching(value: string): string[] {
+  return normalizeText(value)
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2 && !MENU_TOKEN_STOP_WORDS.has(token));
+}
+
+function tokenOverlapScore(left: string, right: string): number {
+  const leftTokens = tokenizeForMenuMatching(left);
+  const rightTokens = tokenizeForMenuMatching(right);
+  if (leftTokens.length === 0 || rightTokens.length === 0) return 0;
+
+  const rightSet = new Set(rightTokens);
+  let overlap = 0;
+  for (const token of leftTokens) {
+    if (rightSet.has(token)) overlap += 1;
+  }
+
+  return overlap / Math.max(leftTokens.length, rightTokens.length);
+}
+
+function isPresentedOptionsFresh(state: ConversationState): boolean {
+  if (!state.last_presented_options_at) return false;
+  const timestamp = new Date(state.last_presented_options_at).getTime();
+  if (!Number.isFinite(timestamp)) return false;
+  return Date.now() - timestamp <= PRESENTED_OPTIONS_TTL_MS;
+}
+
 function expectsStructuredCheckoutInput(step: WorkflowStep): boolean {
   return (
     step === "awaiting_upsell_reply" ||
@@ -2026,6 +2102,19 @@ function findCategoryRequest(text: string, menuItems: MenuCatalogItem[]): string
     const normCategory = normalizeText(category);
     if (normCategory && normalized.includes(normCategory)) return category;
   }
+
+  const fuzzyCategory = categories
+    .map((category) => ({
+      category,
+      score: Math.max(
+        itemSimilarityScore(normalized, normalizeText(category)),
+        tokenOverlapScore(normalized, normalizeText(category)),
+      ),
+    }))
+    .filter((entry) => entry.score >= 0.52)
+    .sort((left, right) => right.score - left.score)[0];
+
+  if (fuzzyCategory) return fuzzyCategory.category;
 
   return null;
 }
@@ -2861,10 +2950,15 @@ function resolveRequestedItems(
     }
 
     const candidates = menuItems
-      .map((item) => ({
-        item,
-        score: itemSimilarityScore(normalizedRequest, normalizeText(item.name)),
-      }))
+      .map((item) => {
+        const normalizedItem = normalizeText(item.name);
+        const lexicalScore = itemSimilarityScore(normalizedRequest, normalizedItem);
+        const overlap = tokenOverlapScore(normalizedRequest, normalizedItem);
+        return {
+          item,
+          score: Math.max(lexicalScore, overlap),
+        };
+      })
       .filter((entry) => entry.score >= 0.45)
       .sort((left, right) => right.score - left.score);
 
@@ -2967,7 +3061,11 @@ function findInlineItems(rawText: string, menuItems: MenuCatalogItem[]): Array<{
     const itemName = normalizeText(item.name);
     if (!itemName) continue;
     const itemCompact = normalizeCompact(item.name);
-    const isMatched = normalized.includes(itemName) || (itemCompact.length >= 5 && compact.includes(itemCompact));
+    const overlapScore = tokenOverlapScore(normalized, itemName);
+    const isMatched =
+      normalized.includes(itemName) ||
+      (itemCompact.length >= 5 && compact.includes(itemCompact)) ||
+      overlapScore >= 0.66;
     if (!isMatched) continue;
     items.push({
       name: item.name,
@@ -2990,6 +3088,7 @@ function isGroundedItemRequest(rawText: string, requestName: string, semanticMat
 
   const requestTokens = normalizedRequest.split(" ").filter((token) => token.length >= 4);
   if (requestTokens.some((token) => normalizedRaw.includes(token))) return true;
+  if (tokenOverlapScore(normalizedRaw, normalizedRequest) >= 0.6) return true;
 
   return semanticMatches.some(
     (match) =>
@@ -3030,10 +3129,16 @@ function itemSimilarityScore(left: string, right: string): number {
 function findLikelyMenuSuggestions(text: string, menuItems: MenuCatalogItem[], limit = 3): MenuCatalogItem[] {
   const normalized = normalizeText(text);
   return menuItems
-    .map((item) => ({
-      item,
-      score: itemSimilarityScore(normalized, normalizeText(item.name)),
-    }))
+    .map((item) => {
+      const normalizedItem = normalizeText(item.name);
+      return {
+        item,
+        score: Math.max(
+          itemSimilarityScore(normalized, normalizedItem),
+          tokenOverlapScore(normalized, normalizedItem),
+        ),
+      };
+    })
     .filter((entry) => entry.score >= 0.35)
     .sort((left, right) => right.score - left.score)
     .slice(0, limit)
@@ -3276,7 +3381,30 @@ function findPresentedOptionByDirectValue(rawText: string, options: MenuCatalogI
 
   const normalized = normalizeText(trimmed);
   if (!normalized) return null;
-  return options.find((item) => normalizeText(item.name) === normalized) ?? null;
+  const exactByName = options.find((item) => normalizeText(item.name) === normalized);
+  if (exactByName) return exactByName;
+
+  const ranked = options
+    .map((item) => {
+      const normalizedName = normalizeText(item.name);
+      return {
+        item,
+        score: Math.max(
+          itemSimilarityScore(normalized, normalizedName),
+          tokenOverlapScore(normalized, normalizedName),
+        ),
+      };
+    })
+    .filter((entry) => entry.score >= 0.72)
+    .sort((left, right) => right.score - left.score);
+
+  const best = ranked[0];
+  const second = ranked[1];
+  if (!best) return null;
+  if (!second || best.score - second.score >= 0.08) {
+    return best.item;
+  }
+  return null;
 }
 
 function shouldDeferToContextSwitchFallback(
@@ -3371,6 +3499,27 @@ function parseSelectionWithQty(
   }
 
   const numbers = [...normalized.matchAll(/\b(\d{1,2})\b/g)].map((match) => Number.parseInt(match[1], 10));
+  if (numbers.length === 0) {
+    const ordinalMap: Record<string, number> = {
+      first: 1,
+      second: 2,
+      third: 3,
+      fourth: 4,
+      fifth: 5,
+      pehla: 1,
+      pehli: 1,
+      pehle: 1,
+      doosra: 2,
+      dosra: 2,
+      dusra: 2,
+      teesra: 3,
+    };
+    for (const [token, option] of Object.entries(ordinalMap)) {
+      if (new RegExp(`\\b${token}\\b`).test(normalized) && option <= optionCount) {
+        return { optionIndex: option - 1, qty: 1 };
+      }
+    }
+  }
   if (numbers.length === 1) {
     const option = numbers[0];
     if (option >= 1 && option <= optionCount) {
