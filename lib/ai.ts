@@ -306,10 +306,10 @@ async function repairOrderInterpretation(
   input: OrderTurnInterpretationInput,
   error: z.ZodError,
 ): Promise<OrderTurnInterpretation | null> {
-  const completion = await client.chat.completions.create({
-    model: process.env.ORDER_AGENT_NLU_MODEL || "openrouter/auto",
-    temperature: 0,
-    max_tokens: 700,
+    const completion = await client.chat.completions.create({
+      model: process.env.ORDER_AGENT_NLU_MODEL || "openrouter/auto",
+      temperature: 0,
+      max_tokens: Number(process.env.ORDER_AGENT_NLU_MAX_TOKENS) || 256,
     response_format: { type: "json_object" },
     messages: [
       {
@@ -352,7 +352,7 @@ export async function getOrderTurnInterpretation(
     const completion = await client.chat.completions.create({
       model: process.env.ORDER_AGENT_NLU_MODEL || "openrouter/auto",
       temperature: 0.1,
-      max_tokens: 700,
+      max_tokens: Number(process.env.ORDER_AGENT_NLU_MAX_TOKENS) || 256,
       response_format: { type: "json_object" },
       messages: [
         {
@@ -495,34 +495,7 @@ export async function processMenuImage(imageUrl: string) {
   const targetClient = googleClient || client;
   const targetModel = googleClient ? "gemini-2.0-flash" : "google/gemini-2.0-flash-001";
 
-  const completion = await targetClient.chat.completions.create({
-    model: targetModel,
-    max_tokens: 8000,
-    messages: [
-      {
-        role: "system",
-        content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
-
-Extract every menu item visible in this image. 
-
-Rules:
-1. Strip numbering from the item name.
-2. Keep portion or size details when present.
-3. Preserve the visible category heading when possible.
-4. Return price as a plain number with no currency symbol.
-5. If price is unreadable, return null. Never guess.
-6. Return JSON only in this shape: { "items": [ { "name": "...", "price": 850, "category": "..." } ] }`,
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Parse this menu image into JSON." },
-          { type: "image_url", image_url: { url: imageUrl } },
-        ],
-      },
-    ],
-    response_format: { type: "json_object" },
-  });
+  const completion = await createMenuCompletion(targetClient, targetModel, imageUrl);
 
   const raw = completion.choices[0]?.message?.content ?? "{}";
   const parsed = JSON.parse(raw) as { items?: unknown[] } | unknown[];
@@ -533,4 +506,76 @@ Rules:
   if (Array.isArray(fallbackArray)) return fallbackArray;
 
   throw new Error("The AI returned an unexpected menu format.");
+}
+
+async function createMenuCompletion(client: any, model: string, imageUrl: string) {
+  try {
+    return await client.chat.completions.create({
+      model,
+      max_tokens: 2000,
+      messages: [
+        {
+          role: "system",
+          content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
+
+Extract every menu item visible in this image.
+
+Rules:
+1. Strip numbering from the item name.
+2. Keep portion or size details when present.
+3. Preserve the visible category heading when possible.
+4. Return price as a plain number with no currency symbol.
+5. If price is unreadable, return null. Never guess.
+6. Return JSON only in this shape: { "items": [ { "name": "...", "price": 850, "category": "..." } ] }`,
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Parse this menu image into JSON." },
+            { type: "image_url", image_url: { url: imageUrl } },
+          ],
+        },
+      ],
+      response_format: { type: "json_object" },
+    });
+  } catch (error: any) {
+    // Handle 429 rate limit errors by retrying with lower token budget
+    if (error?.status === 429) {
+      console.warn("[menu/process] Rate limited, retrying with lower token budget");
+      try {
+        return await client.chat.completions.create({
+          model,
+          max_tokens: 1000, // Reduced budget for retry
+          messages: [
+            {
+              role: "system",
+              content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
+
+Extract every menu item visible in this image.
+
+Rules:
+1. Strip numbering from the item name.
+2. Keep portion or size details when present.
+3. Preserve the visible category heading when possible.
+4. Return price as a plain number with no currency symbol.
+5. If price is unreadable, return null. Never guess.
+6. Return JSON only in this shape: { "items": [ { "name": "...", "price": 850, "category": "..." } ] }`,
+            },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Parse this menu image into JSON." },
+                { type: "image_url", image_url: { url: imageUrl } },
+              ],
+            },
+          ],
+          response_format: { type: "json_object" },
+        });
+      } catch (retryError) {
+        console.error("[menu/process] Retry also failed:", retryError);
+        throw retryError;
+      }
+    }
+    throw error;
+  }
 }
