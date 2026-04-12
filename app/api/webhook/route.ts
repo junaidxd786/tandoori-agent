@@ -213,7 +213,6 @@ async function processWebhook(body: unknown) {
   if (events.length === 0) return;
 
   const branches = await getActiveBranches();
-  const menuReadyBranches = await filterBranchesWithAvailableMenu(branches);
   const agentConversations = new Map<string, ConversationRow>();
 
   for (const event of events) {
@@ -232,14 +231,14 @@ async function processWebhook(body: unknown) {
 
       if (!incomingContent) {
         if (message.type !== "reaction") {
-          await sendBranchSelectionMessage(message.from, menuReadyBranches, prefersRomanUrdu);
+          await sendBranchSelectionMessage(message.from, branches, prefersRomanUrdu);
         }
         continue;
       }
 
-      const selectedBranch = findBranchSelection(incomingContent, menuReadyBranches);
+      const selectedBranch = findBranchSelection(incomingContent, branches);
       if (!selectedBranch) {
-        await sendBranchSelectionMessage(message.from, menuReadyBranches, prefersRomanUrdu);
+        await sendBranchSelectionMessage(message.from, branches, prefersRomanUrdu);
         continue;
       }
 
@@ -349,21 +348,21 @@ async function processWebhook(body: unknown) {
         preferred_language: inferLanguagePreference(content, state.preferred_language),
       });
       await setActiveBranch(contact.id, null);
-      const interactiveList = buildInteractiveListForBranches(menuReadyBranches, state.preferred_language === "roman_urdu");
+      const interactiveList = buildInteractiveListForBranches(branches, state.preferred_language === "roman_urdu");
       const branchFlow = buildFlowMessageForAgentReply({
         context: "branch",
         conversationId: conversation.id,
         prefersRomanUrdu: state.preferred_language === "roman_urdu",
         workflowStep: "awaiting_branch_selection",
-        branches: menuReadyBranches,
+        branches,
         body: interactiveList
           ? interactiveList.body
-          : getBranchSelectionPrompt(menuReadyBranches, state.preferred_language === "roman_urdu"),
+          : getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
       });
       await sendAndPersistAssistantMessage(
         conversation.id,
         message.from,
-        interactiveList ? interactiveList.body : getBranchSelectionPrompt(menuReadyBranches, state.preferred_language === "roman_urdu"),
+        interactiveList ? interactiveList.body : getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
         interactiveList,
         branchFlow,
       );
@@ -383,7 +382,7 @@ async function processWebhook(body: unknown) {
           mode: "agent",
           intent: null,
           lastUserMessage: content,
-          lastAssistantReply: getBranchSelectionPrompt(menuReadyBranches, state.preferred_language === "roman_urdu"),
+          lastAssistantReply: getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
           forceNode: "branch_selection",
         }),
       );
@@ -662,7 +661,7 @@ async function drainConversationQueue(conversation: ConversationRow) {
     if (!branch) {
       throw new Error(`Missing branch ${conversation.branch_id} for conversation ${conversation.id}`);
     }
- let settings = await getRestaurantSettings(conversation.branch_id);
+    let settings = await getRestaurantSettings(conversation.branch_id);
     let settingsLoadedAt = Date.now();
     let isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
     let cachedMenuItems: MenuCatalogItem[] | null = null;
@@ -715,10 +714,9 @@ async function drainConversationQueue(conversation: ConversationRow) {
 
       // Only load expensive resources for complex/menu messages
       const needsFullProcessing = messageType === "complex" || messageType === "menu_related";
-      if (Date.now() - settingsLoadedAt > 60_000) {
-        settings = await getRestaurantSettings(conversation.branch_id);
-        settingsLoadedAt = Date.now();
-        isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
+      if (needsFullProcessing && (!cachedMenuItems || Date.now() - menuLoadedAt > 5 * 60_000)) {
+        cachedMenuItems = await getMenuCatalog(conversation.branch_id);
+        menuLoadedAt = Date.now();
       }
       const shouldHydrateSession = !(messageType === "greeting" || messageType === "acknowledgment");
       const [
@@ -738,66 +736,6 @@ async function drainConversationQueue(conversation: ConversationRow) {
             })
           : Promise.resolve(getDefaultUserSession(conversation.id)),
       ]);
-
-      if (needsFullProcessing && menuItems.length === 0) {
-        const prefersRomanUrdu = (state.preferred_language ?? "english") === "roman_urdu";
-        const activeBranches = await getActiveBranches();
-        const menuReadyBranches = await filterBranchesWithAvailableMenu(activeBranches);
-        await setActiveBranch(conversation.contact_id, null);
-        const resetState = {
-          ...getDefaultConversationState(conversation.id),
-          workflow_step: "awaiting_branch_selection" as const,
-          preferred_language: state.preferred_language,
-        };
-        await updateConversationState(state, resetState);
-
-        const reason = prefersRomanUrdu
-          ? "Lagta hai is branch ka menu abhi set nahi hai. Pehle branch select kar lein."
-          : "It looks like this branch menu isn't set up yet. Please choose your branch first.";
-        const list = buildInteractiveListForBranches(menuReadyBranches, prefersRomanUrdu);
-        const interactiveList = list ? { ...list, body: `${reason}\n\n${list.body}` } : null;
-        const replyText = interactiveList
-          ? interactiveList.body
-          : `${reason}\n\n${getBranchSelectionPrompt(menuReadyBranches, prefersRomanUrdu)}`;
-        const branchFlow = buildFlowMessageForAgentReply({
-          context: "branch",
-          conversationId: conversation.id,
-          prefersRomanUrdu,
-          workflowStep: "awaiting_branch_selection",
-          branches: menuReadyBranches,
-          body: replyText,
-        });
-        await sendAndPersistAssistantMessage(
-          conversation.id,
-          conversation.phone,
-          replyText,
-          interactiveList,
-          branchFlow,
-        );
-        await markMessageProcessed(
-          state,
-          nextMessage.whatsapp_msg_id ?? nextMessage.id,
-          nextMessage.created_at,
-          nextMessage.ingest_seq,
-        );
-        await updateUserSession(
-          conversation.id,
-          buildSessionUpdate({
-            session,
-            stateBefore: state,
-            stateAfter: parseConversationState({
-              ...resetState,
-              conversation_id: conversation.id,
-            }),
-            mode: "agent",
-            intent: null,
-            lastUserMessage: nextMessage.content,
-            lastAssistantReply: replyText,
-            forceNode: "branch_selection",
-          }),
-        );
-        continue;
-      }
 
       const decision = await decideTurn({
         messageText: nextMessage.content,
@@ -1412,11 +1350,11 @@ function buildInteractiveListForPresentedOptions(
     rows: Array<{ id: string; title: string; description?: string }>;
   }
   | null {
-  if (!Array.isArray(options) || options.length < 2 || options.length > 10) {
+  if (!Array.isArray(options) || options.length < 1) {
     return null;
   }
 
-  const rows = options.map((item) => ({
+  const rows = options.slice(0, 10).map((item) => ({
     id: item.id,
     title: item.name,
     description: `Rs. ${item.price}${item.category ? ` • ${item.category}` : ""}`,
@@ -1443,11 +1381,11 @@ function buildInteractiveListForBranches(
     rows: Array<{ id: string; title: string; description?: string }>;
   }
   | null {
-  if (!Array.isArray(branches) || branches.length < 2 || branches.length > 10) {
+  if (!Array.isArray(branches) || branches.length < 1) {
     return null;
   }
 
-  const rows = branches.map((branch) => ({
+  const rows = branches.slice(0, 10).map((branch) => ({
     id: branch.id,
     title: branch.name,
     description: branch.address || undefined,
@@ -1543,49 +1481,27 @@ function inferFlowContext(workflowStep: ConversationState["workflow_step"]): Wha
 }
 
 async function sendBranchSelectionMessage(phone: string, branches: BranchSummary[], prefersRomanUrdu: boolean) {
+  const interactiveList = buildInteractiveListForBranches(branches, prefersRomanUrdu);
+  if (interactiveList) {
+    try {
+      await sendWhatsAppInteractiveList(phone, interactiveList);
+      return;
+    } catch (error) {
+      console.warn("[webhook] Interactive branch list failed, falling back to text:", error);
+    }
+  }
+
   const flowMessage = buildBranchSelectionFlowMessage(phone, branches, prefersRomanUrdu);
   if (flowMessage) {
     try {
       await sendWhatsAppInteractiveFlow(phone, flowMessage);
       return;
     } catch (error) {
-      console.warn("[webhook] Flow branch selector failed, falling back to interactive list:", error);
+      console.warn("[webhook] Flow branch selector failed, falling back to text:", error);
     }
   }
 
-  const interactiveList = buildInteractiveListForBranches(branches, prefersRomanUrdu);
-  if (interactiveList) {
-    try {
-      await sendWhatsAppInteractiveList(phone, interactiveList);
-    } catch (error) {
-      console.warn("[webhook] Interactive branch list failed, falling back to text:", error);
-      await sendWhatsAppMessage(phone, getBranchSelectionPrompt(branches, prefersRomanUrdu));
-    }
-  } else {
-    await sendWhatsAppMessage(phone, getBranchSelectionPrompt(branches, prefersRomanUrdu));
-  }
-}
-
-async function filterBranchesWithAvailableMenu(branches: BranchSummary[]): Promise<BranchSummary[]> {
-  if (!Array.isArray(branches) || branches.length === 0) return [];
-
-  const branchIds = branches.map((branch) => branch.id).filter(Boolean);
-  if (branchIds.length === 0) return branches;
-
-  const { data, error } = await supabaseAdmin
-    .from("menu_items")
-    .select("branch_id")
-    .in("branch_id", branchIds)
-    .eq("is_available", true);
-
-  if (error) {
-    console.warn("[branches] Failed to check menu availability per-branch:", error);
-    return branches;
-  }
-
-  const availableBranches = new Set<string>((data ?? []).map((row) => row.branch_id).filter(Boolean));
-  const filtered = branches.filter((branch) => availableBranches.has(branch.id));
-  return filtered.length > 0 ? filtered : branches;
+  await sendWhatsAppMessage(phone, getBranchSelectionPrompt(branches, prefersRomanUrdu));
 }
 
 function buildInteractiveFallbackText(payload: {
