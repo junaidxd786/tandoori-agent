@@ -242,18 +242,14 @@ async function processWebhook(body: unknown) {
         continue;
       }
 
-      let selectedBranch = findBranchSelection(incomingContent, branches);
-      if (!selectedBranch) {
-        const selectedCity = findCitySelection(
-          incomingContent,
-          cityGroups.map((group) => group.city),
-        );
+      // City selection must win over branch fuzzy-matching (branch addresses often include city names).
+      // Otherwise typing "Lahore" could accidentally match a branch and skip the branch list.
+      const selectedCity = findCitySelection(
+        incomingContent,
+        cityGroups.map((group) => group.city),
+      );
 
-        if (!selectedCity) {
-          await sendCitySelectionMessage(message.from, cityGroups, prefersRomanUrdu);
-          continue;
-        }
-
+      if (selectedCity) {
         const cityGroup =
           cityGroups.find((group) => normalizeCityValue(group.city) === normalizeCityValue(selectedCity)) ?? null;
         const cityBranches = cityGroup?.branches ?? [];
@@ -263,17 +259,95 @@ async function processWebhook(body: unknown) {
         }
 
         if (cityBranches.length === 1) {
-          selectedBranch = cityBranches[0];
-        } else {
-          await sendBranchSelectionMessage(message.from, cityBranches, prefersRomanUrdu, selectedCity);
+          // Auto-pick single-branch cities.
+          const selectedBranch = cityBranches[0];
+          await setActiveBranch(contact.id, selectedBranch.id);
+          contact.active_branch_id = selectedBranch.id;
+
+          const selectedConversation = await upsertConversation(contact, selectedBranch.id, contactName);
+          const selectedState = await getOrCreateConversationState(selectedConversation.id);
+          const createdAt = toIsoTimestamp(message.timestamp);
+          if (selectedState.last_processed_user_message_id === message.id) {
+            continue;
+          }
+
+          const persistedMessage = await persistUserMessage(
+            selectedConversation.id,
+            incomingContent,
+            message.id,
+            createdAt,
+          );
+
+          const assistantReply = prefersRomanUrdu
+            ? `Theek hai, *${selectedBranch.name}* select ho gayi. Address: ${selectedBranch.address}\n\nAb category select karein ya item name bhej dein.`
+            : `Great, you've selected *${selectedBranch.name}*. Address: ${selectedBranch.address}\n\nNow choose a category or send any item name.`;
+          const selectedMenuItems = await getMenuCatalog(selectedBranch.id);
+          const categoryInteractiveList = buildInteractiveCategoryList(selectedMenuItems, prefersRomanUrdu, 1);
+
+          await sendAndPersistAssistantMessage(
+            selectedConversation.id,
+            message.from,
+            assistantReply,
+            categoryInteractiveList,
+            null,
+          );
+
+          await markMessageProcessed(
+            selectedState,
+            message.id,
+            createdAt,
+            persistedMessage.message?.ingest_seq ?? null,
+            {
+              workflow_step: "collecting_items",
+              last_presented_category: "__category_list__",
+              last_presented_options: null,
+              last_presented_options_at: null,
+              preferred_language: prefersRomanUrdu ? "roman_urdu" : "english",
+            },
+          );
+
+          const selectedSession = await getOrCreateUserSession(selectedConversation.id, {
+            active_node: "cart_builder",
+            status: "active",
+            is_bot_active: true,
+          });
+
+          await updateUserSession(
+            selectedConversation.id,
+            buildSessionUpdate({
+              session: selectedSession,
+              stateBefore: selectedState,
+              stateAfter: parseConversationState({
+                ...selectedState,
+                conversation_id: selectedConversation.id,
+                workflow_step: "collecting_items",
+                last_presented_category: "__category_list__",
+                last_presented_options: null,
+                last_presented_options_at: null,
+                preferred_language: prefersRomanUrdu ? "roman_urdu" : "english",
+              }),
+              mode: "agent",
+              intent: null,
+              lastUserMessage: incomingContent,
+              lastAssistantReply: assistantReply,
+            }),
+          );
+
           continue;
         }
+
+        await sendBranchSelectionMessage(message.from, cityBranches, prefersRomanUrdu, selectedCity);
+        continue;
       }
 
+      // If user didn't select a city, allow direct branch selection by typing branch name/number.
+      const selectedBranch = findBranchSelection(incomingContent, branches);
       if (!selectedBranch) {
         await sendCitySelectionMessage(message.from, cityGroups, prefersRomanUrdu);
         continue;
       }
+
+      // Continue with global branch selection (existing logic below uses selectedBranch).
 
       await setActiveBranch(contact.id, selectedBranch.id);
       // Update local contact object so subsequent logic uses the correct branch
