@@ -2,15 +2,11 @@
   "name": "tandoori-agent",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
-    "menu:process": "node scripts/process-menu.js",
-    "menu:validate": "node scripts/validate-menu.js",
-    "menu:upload": "node scripts/upload-menu.js"
+    "lint": "eslint"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",

@@ -4,6 +4,7 @@ export interface BranchRecord {
   id: string;
   slug: string;
   name: string;
+  city: string;
   address: string;
   is_active: boolean;
   created_at: string;
@@ -14,6 +15,7 @@ export interface BranchSummary {
   id: string;
   slug: string;
   name: string;
+  city: string;
   address: string;
 }
 
@@ -44,7 +46,7 @@ export function isBranchChangeRequest(messageText: string): boolean {
 export async function getActiveBranches(): Promise<BranchRecord[]> {
   const { data, error } = await supabaseAdmin
     .from("branches")
-    .select("id, slug, name, address, is_active, created_at, updated_at")
+    .select("id, slug, name, city, address, is_active, created_at, updated_at")
     .eq("is_active", true)
     .order("name", { ascending: true });
 
@@ -59,7 +61,7 @@ export async function getActiveBranches(): Promise<BranchRecord[]> {
 export async function getBranchById(branchId: string): Promise<BranchRecord | null> {
   const { data, error } = await supabaseAdmin
     .from("branches")
-    .select("id, slug, name, address, is_active, created_at, updated_at")
+    .select("id, slug, name, city, address, is_active, created_at, updated_at")
     .eq("id", branchId)
     .maybeSingle();
 

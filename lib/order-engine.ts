@@ -308,6 +308,13 @@ const MENU_TOKEN_STOP_WORDS = new Set([
 
 const PRESENTED_OPTIONS_TTL_MS = 20 * 60 * 1000;
 
+function isShortAcknowledgment(normalizedText: string): boolean {
+  const trimmed = normalizedText.trim();
+  if (!trimmed) return false;
+  if (trimmed.split(/\s+/).length > 3) return false;
+  return /\b(ok|okay|k|thanks|thank\s*you|shukriya|theek|fine|good|alright|sure|haan|han|na|nahi)\b/i.test(trimmed);
+}
+
 const ADDRESS_HINTS = [
   "street",
   "st",
@@ -820,6 +827,43 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   if (state.last_presented_category === "__category_list__") {
+    const requestedCategoryPage = parseCategoryMorePage(rawText);
+    if (requestedCategoryPage) {
+      const categoryReply = buildCategoryListReply(menuItems, prefersRomanUrdu, requestedCategoryPage);
+      return replyDecision(
+        categoryReply.text,
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_category: "__category_list__",
+            last_presented_options: null,
+            last_presented_options_at: null,
+          },
+          preferredLanguage,
+        ),
+        trace,
+        categoryReply.interactiveList,
+      );
+    }
+
+    if (/^(more|next|more categories)$/i.test(rawText.trim())) {
+      const categoryReply = buildCategoryListReply(menuItems, prefersRomanUrdu, 2);
+      return replyDecision(
+        categoryReply.text,
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_category: "__category_list__",
+            last_presented_options: null,
+            last_presented_options_at: null,
+          },
+          preferredLanguage,
+        ),
+        trace,
+        categoryReply.interactiveList,
+      );
+    }
+
     const category = findCategoryRequest(normalizedText, menuItems);
     if (category) {
       const categoryReply = buildCategoryItemsReply(category, menuItems, prefersRomanUrdu);
@@ -859,11 +903,30 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     }
   }
 
-  if (interpretation.intent === "greeting" && state.cart.length === 0 && state.workflow_step === "idle") {
+  // If the user greets (or sends a short ack) and there's no draft, proactively show categories.
+  // Direct order messages still flow through normal parsing earlier in this function.
+  if (
+    (interpretation.intent === "greeting" || isShortAcknowledgment(normalizedText)) &&
+    state.cart.length === 0 &&
+    state.workflow_step === "idle"
+  ) {
+    const categoryReply = buildCategoryListReply(menuItems, prefersRomanUrdu, 1);
+    const welcome = getGreetingReply(rawText, prefersRomanUrdu);
+    const combined = `${welcome}\n\n${categoryReply.text}`;
+
     return replyDecision(
-      getGreetingReply(rawText, prefersRomanUrdu),
-      withPreferredLanguage({}, preferredLanguage),
+      combined,
+      withPreferredLanguage(
+        {
+          workflow_step: "collecting_items",
+          last_presented_category: "__category_list__",
+          last_presented_options: null,
+          last_presented_options_at: null,
+        },
+        preferredLanguage,
+      ),
       trace,
+      categoryReply.interactiveList,
     );
   }
 
@@ -2029,7 +2092,21 @@ function getMenuCategories(menuItems: MenuCatalogItem[]): string[] {
   return [...new Set(menuItems.map((item) => item.category?.trim() || "General"))];
 }
 
-function buildCategoryListReply(menuItems: MenuCatalogItem[], romanUrdu: boolean): {
+function parseCategoryMorePage(text: string): number | null {
+  const raw = text.trim();
+  const moreMatch = raw.match(/^category[_\s-]?more[_\s-]?(\d+)$/i);
+  if (!moreMatch) return null;
+
+  const page = Number.parseInt(moreMatch[1], 10);
+  if (!Number.isFinite(page) || page < 1) return null;
+  return page;
+}
+
+function buildCategoryListReply(
+  menuItems: MenuCatalogItem[],
+  romanUrdu: boolean,
+  page = 1,
+): {
   text: string;
   interactiveList?: {
     body: string;
@@ -2047,9 +2124,25 @@ function buildCategoryListReply(menuItems: MenuCatalogItem[], romanUrdu: boolean
     };
   }
 
+  const pageSize = 9;
+  const safePage = Math.max(1, page);
+  const start = (safePage - 1) * pageSize;
+  const visibleCategories = categories.slice(start, start + pageSize);
+  if (visibleCategories.length === 0) {
+    return buildCategoryListReply(menuItems, romanUrdu, 1);
+  }
+  const hasMore = start + pageSize < categories.length;
+
   const text = [
     "Available categories:",
-    ...categories.map((category, index) => `${index + 1}. ${category}`),
+    ...visibleCategories.map((category, index) => `${start + index + 1}. ${category}`),
+    ...(hasMore
+      ? [
+          romanUrdu
+            ? "...mazeed categories ke liye *more* bhej dein."
+            : "...for more categories, send *more*.",
+        ]
+      : []),
     romanUrdu
       ? "Category ka *number* ya *name* bhej dein."
       : "Reply with category *number* or *name*.",
@@ -2062,23 +2155,31 @@ function buildCategoryListReply(menuItems: MenuCatalogItem[], romanUrdu: boolean
     rows: Array<{ id: string; title: string; description?: string }>;
   } | null = null;
 
-  const interactiveCategories = categories.slice(0, 10);
-  if (interactiveCategories.length >= 2) {
+  if (visibleCategories.length >= 1) {
+    const rows = visibleCategories.map((category, index) => {
+      const absoluteIndex = start + index + 1;
+      const truncatedTitle = category.length > 24 ? category.slice(0, 21) + "..." : category;
+      return {
+        id: `category_option_${absoluteIndex}`,
+        title: truncatedTitle,
+        description: undefined,
+      };
+    });
+    if (hasMore) {
+      rows.push({
+        id: `category_more_${safePage + 1}`,
+        title: romanUrdu ? "More Categories" : "More Categories",
+        description: undefined,
+      });
+    }
+
     interactiveList = {
       body: romanUrdu
         ? "Menu categories se ek select karein."
         : "Choose a category from the menu.",
       buttonText: romanUrdu ? "Select Category" : "Select Category",
       sectionTitle: romanUrdu ? "Categories" : "Categories",
-      rows: interactiveCategories.map((category, index) => {
-        // Truncate category names for WhatsApp interactive list (24 char limit)
-        const truncatedTitle = category.length > 24 ? category.slice(0, 21) + "..." : category;
-        return {
-          id: `category_option_${index + 1}`,
-          title: truncatedTitle,
-          description: undefined,
-        };
-      }),
+      rows,
     };
   }
 

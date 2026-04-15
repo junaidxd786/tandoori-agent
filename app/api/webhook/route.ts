@@ -138,6 +138,11 @@ type PersistedUserMessage = {
   message: MessageRow | null;
 };
 
+type CityBranchGroup = {
+  city: string;
+  branches: BranchSummary[];
+};
+
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
@@ -213,6 +218,7 @@ async function processWebhook(body: unknown) {
   if (events.length === 0) return;
 
   const branches = await getActiveBranches();
+  const cityGroups = await buildCityBranchGroups(branches);
   const agentConversations = new Map<string, ConversationRow>();
 
   for (const event of events) {
@@ -231,14 +237,41 @@ async function processWebhook(body: unknown) {
 
       if (!incomingContent) {
         if (message.type !== "reaction") {
-          await sendBranchSelectionMessage(message.from, branches, prefersRomanUrdu);
+          await sendCitySelectionMessage(message.from, cityGroups, prefersRomanUrdu);
         }
         continue;
       }
 
-      const selectedBranch = findBranchSelection(incomingContent, branches);
+      let selectedBranch = findBranchSelection(incomingContent, branches);
       if (!selectedBranch) {
-        await sendBranchSelectionMessage(message.from, branches, prefersRomanUrdu);
+        const selectedCity = findCitySelection(
+          incomingContent,
+          cityGroups.map((group) => group.city),
+        );
+
+        if (!selectedCity) {
+          await sendCitySelectionMessage(message.from, cityGroups, prefersRomanUrdu);
+          continue;
+        }
+
+        const cityGroup =
+          cityGroups.find((group) => normalizeCityValue(group.city) === normalizeCityValue(selectedCity)) ?? null;
+        const cityBranches = cityGroup?.branches ?? [];
+        if (cityBranches.length === 0) {
+          await sendCitySelectionMessage(message.from, cityGroups, prefersRomanUrdu);
+          continue;
+        }
+
+        if (cityBranches.length === 1) {
+          selectedBranch = cityBranches[0];
+        } else {
+          await sendBranchSelectionMessage(message.from, cityBranches, prefersRomanUrdu, selectedCity);
+          continue;
+        }
+      }
+
+      if (!selectedBranch) {
+        await sendCitySelectionMessage(message.from, cityGroups, prefersRomanUrdu);
         continue;
       }
 
@@ -262,27 +295,32 @@ async function processWebhook(body: unknown) {
       );
 
       const assistantReply = prefersRomanUrdu
-        ? `Theek hai, *${selectedBranch.name}* select ho gayi. Address: ${selectedBranch.address}\n\nAb apna order bhej dein.`
-        : `Great, you've selected *${selectedBranch.name}*. Address: ${selectedBranch.address}\n\nSend your order whenever you're ready.`;
-
-      const initialMenuFlow = buildFlowMessageForAgentReply({
-        context: "menu",
-        conversationId: selectedConversation.id,
-        prefersRomanUrdu,
-        workflowStep: "collecting_items",
-        branch: selectedBranch,
-        body: assistantReply,
-      });
+        ? `Theek hai, *${selectedBranch.name}* select ho gayi. Address: ${selectedBranch.address}\n\nAb category select karein ya item name bhej dein.`
+        : `Great, you've selected *${selectedBranch.name}*. Address: ${selectedBranch.address}\n\nNow choose a category or send any item name.`;
+      const selectedMenuItems = await getMenuCatalog(selectedBranch.id);
+      const categoryInteractiveList = buildInteractiveCategoryList(selectedMenuItems, prefersRomanUrdu, 1);
 
       await sendAndPersistAssistantMessage(
         selectedConversation.id,
         message.from,
         assistantReply,
+        categoryInteractiveList,
         null,
-        initialMenuFlow,
       );
-      
-      await markMessageProcessed(selectedState, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
+
+      await markMessageProcessed(
+        selectedState,
+        message.id,
+        createdAt,
+        persistedMessage.message?.ingest_seq ?? null,
+        {
+          workflow_step: "collecting_items",
+          last_presented_category: "__category_list__",
+          last_presented_options: null,
+          last_presented_options_at: null,
+          preferred_language: prefersRomanUrdu ? "roman_urdu" : "english",
+        },
+      );
       
       const selectedSession = await getOrCreateUserSession(selectedConversation.id, {
         active_node: "cart_builder",
@@ -295,7 +333,15 @@ async function processWebhook(body: unknown) {
         buildSessionUpdate({
           session: selectedSession,
           stateBefore: selectedState,
-          stateAfter: selectedState,
+          stateAfter: parseConversationState({
+            ...selectedState,
+            conversation_id: selectedConversation.id,
+            workflow_step: "collecting_items",
+            last_presented_category: "__category_list__",
+            last_presented_options: null,
+            last_presented_options_at: null,
+            preferred_language: prefersRomanUrdu ? "roman_urdu" : "english",
+          }),
           mode: "agent",
           intent: null,
           lastUserMessage: incomingContent,
@@ -342,28 +388,29 @@ async function processWebhook(body: unknown) {
     const persistedMessage = await persistUserMessage(conversation.id, content, message.id, createdAt);
 
     if (isBranchChangeRequest(content)) {
+      const prefersRomanUrduForFlow = state.preferred_language === "roman_urdu";
+      const availableCities = cityGroups.map((group) => group.city);
+      const cityInteractiveList = buildInteractiveListForCities(availableCities, prefersRomanUrduForFlow);
+      const cityPrompt = getCitySelectionPrompt(availableCities, prefersRomanUrduForFlow);
       await updateConversationState(state, {
         ...getDefaultConversationState(conversation.id),
         workflow_step: "awaiting_branch_selection",
         preferred_language: inferLanguagePreference(content, state.preferred_language),
       });
       await setActiveBranch(contact.id, null);
-      const interactiveList = buildInteractiveListForBranches(branches, state.preferred_language === "roman_urdu");
       const branchFlow = buildFlowMessageForAgentReply({
         context: "branch",
         conversationId: conversation.id,
-        prefersRomanUrdu: state.preferred_language === "roman_urdu",
+        prefersRomanUrdu: prefersRomanUrduForFlow,
         workflowStep: "awaiting_branch_selection",
         branches,
-        body: interactiveList
-          ? interactiveList.body
-          : getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
+        body: cityInteractiveList ? cityInteractiveList.body : cityPrompt,
       });
       await sendAndPersistAssistantMessage(
         conversation.id,
         message.from,
-        interactiveList ? interactiveList.body : getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
-        interactiveList,
+        cityInteractiveList ? cityInteractiveList.body : cityPrompt,
+        cityInteractiveList,
         branchFlow,
       );
       await markMessageProcessed(state, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
@@ -382,7 +429,7 @@ async function processWebhook(body: unknown) {
           mode: "agent",
           intent: null,
           lastUserMessage: content,
-          lastAssistantReply: getBranchSelectionPrompt(branches, state.preferred_language === "roman_urdu"),
+          lastAssistantReply: cityPrompt,
           forceNode: "branch_selection",
         }),
       );
@@ -831,6 +878,7 @@ async function drainConversationQueue(conversation: ConversationRow) {
               id: branch.id,
               slug: branch.slug,
               name: branch.name,
+              city: branch.city,
               address: branch.address,
             },
           );
@@ -1172,8 +1220,10 @@ async function markMessageProcessed(
   whatsappMessageId: string,
   createdAt: string,
   ingestSeq: number | null,
+  extraPatch?: Partial<ConversationState>,
 ) {
   await updateConversationState(state, {
+    ...extraPatch,
     last_processed_user_message_id: whatsappMessageId,
     ...(ingestSeq != null ? { last_processed_message_seq: ingestSeq } : {}),
     last_processed_user_message_at: createdAt,
@@ -1373,6 +1423,7 @@ function buildInteractiveListForPresentedOptions(
 function buildInteractiveListForBranches(
   branches: BranchSummary[],
   prefersRomanUrdu: boolean,
+  selectedCity?: string,
 ):
   | {
     body: string;
@@ -1393,8 +1444,12 @@ function buildInteractiveListForBranches(
 
   return {
     body: prefersRomanUrdu
-      ? "Order shuru karne se pehle apni branch select karein."
-      : "Before we start your order, please choose your branch.",
+      ? selectedCity
+        ? `*${selectedCity}* mein apni branch select karein.`
+        : "Order shuru karne se pehle apni branch select karein."
+      : selectedCity
+        ? `Please choose your branch in *${selectedCity}*.`
+        : "Before we start your order, please choose your branch.",
     buttonText: prefersRomanUrdu ? "Select Branch" : "Select Branch",
     sectionTitle: prefersRomanUrdu ? "Branches" : "Branches",
     rows,
@@ -1480,8 +1535,13 @@ function inferFlowContext(workflowStep: ConversationState["workflow_step"]): Wha
   return null;
 }
 
-async function sendBranchSelectionMessage(phone: string, branches: BranchSummary[], prefersRomanUrdu: boolean) {
-  const interactiveList = buildInteractiveListForBranches(branches, prefersRomanUrdu);
+async function sendBranchSelectionMessage(
+  phone: string,
+  branches: BranchSummary[],
+  prefersRomanUrdu: boolean,
+  selectedCity?: string,
+) {
+  const interactiveList = buildInteractiveListForBranches(branches, prefersRomanUrdu, selectedCity);
   if (interactiveList) {
     try {
       await sendWhatsAppInteractiveList(phone, interactiveList);
@@ -1501,7 +1561,247 @@ async function sendBranchSelectionMessage(phone: string, branches: BranchSummary
     }
   }
 
-  await sendWhatsAppMessage(phone, getBranchSelectionPrompt(branches, prefersRomanUrdu));
+  await sendWhatsAppMessage(phone, getBranchSelectionPromptForCity(branches, prefersRomanUrdu, selectedCity));
+}
+
+async function sendCitySelectionMessage(
+  phone: string,
+  cityGroups: CityBranchGroup[],
+  prefersRomanUrdu: boolean,
+) {
+  const cities = cityGroups.map((group) => group.city);
+  const interactiveList = buildInteractiveListForCities(cities, prefersRomanUrdu);
+  if (interactiveList) {
+    try {
+      await sendWhatsAppInteractiveList(phone, interactiveList);
+      return;
+    } catch (error) {
+      console.warn("[webhook] Interactive city list failed, falling back to text:", error);
+    }
+  }
+
+  await sendWhatsAppMessage(phone, getCitySelectionPrompt(cities, prefersRomanUrdu));
+}
+
+function getBranchSelectionPromptForCity(
+  branches: BranchSummary[],
+  prefersRomanUrdu: boolean,
+  selectedCity?: string,
+): string {
+  if (!selectedCity) {
+    return getBranchSelectionPrompt(branches, prefersRomanUrdu);
+  }
+
+  if (branches.length === 0) {
+    return prefersRomanUrdu
+      ? `Maazrat, ${selectedCity} mein koi branch available nahi hai.`
+      : `Sorry, no branches are available in ${selectedCity}.`;
+  }
+
+  const intro = prefersRomanUrdu
+    ? `${selectedCity} mein apni branch select karein:`
+    : `Please choose your branch in ${selectedCity}:`;
+  const closing = prefersRomanUrdu
+    ? "Reply mein branch ka naam bhej dein."
+    : "Reply with your branch name.";
+
+  return [
+    intro,
+    ...branches.map((branch, index) => `${index + 1}. ${branch.name}${branch.address ? ` - ${branch.address}` : ""}`),
+    closing,
+  ].join("\n");
+}
+
+function buildInteractiveListForCities(
+  cities: string[],
+  prefersRomanUrdu: boolean,
+):
+  | {
+    body: string;
+    buttonText: string;
+    sectionTitle?: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  }
+  | null {
+  const uniqueCities = dedupeCities(cities);
+  if (uniqueCities.length < 1) {
+    return null;
+  }
+
+  const rows = uniqueCities.slice(0, 10).map((city, index) => ({
+    id: `city_option_${index + 1}`,
+    title: city,
+  }));
+
+  return {
+    body: prefersRomanUrdu
+      ? "Welcome! Sab se pehle apna city select karein."
+      : "Welcome! First, please choose your city.",
+    buttonText: prefersRomanUrdu ? "Select City" : "Select City",
+    sectionTitle: prefersRomanUrdu ? "Cities" : "Cities",
+    rows,
+  };
+}
+
+function getUniqueMenuCategories(menuItems: MenuCatalogItem[]): string[] {
+  return [...new Set(menuItems.map((item) => item.category?.trim() || "General"))];
+}
+
+function buildInteractiveCategoryList(
+  menuItems: MenuCatalogItem[],
+  prefersRomanUrdu: boolean,
+  page: number,
+):
+  | {
+    body: string;
+    buttonText: string;
+    sectionTitle?: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  }
+  | null {
+  const categories = getUniqueMenuCategories(menuItems);
+  if (categories.length < 2) return null;
+
+  const pageSize = 9;
+  const safePage = Math.max(1, page);
+  const start = (safePage - 1) * pageSize;
+  if (start >= categories.length) return null;
+
+  const pageCategories = categories.slice(start, start + pageSize);
+  const rows = pageCategories.map((category, index) => {
+    const absoluteIndex = start + index + 1;
+    const title = category.length > 24 ? `${category.slice(0, 21)}...` : category;
+    return {
+      id: `category_option_${absoluteIndex}`,
+      title,
+    };
+  });
+
+  const hasMore = start + pageSize < categories.length;
+  if (hasMore) {
+    rows.push({
+      id: `category_more_${safePage + 1}`,
+      title: prefersRomanUrdu ? "More Categories" : "More Categories",
+    });
+  }
+
+  return {
+    body: prefersRomanUrdu
+      ? "Menu categories se ek select karein."
+      : "Choose a category from the menu.",
+    buttonText: prefersRomanUrdu ? "Select Category" : "Select Category",
+    sectionTitle: prefersRomanUrdu ? "Categories" : "Categories",
+    rows,
+  };
+}
+
+function getCitySelectionPrompt(cities: string[], prefersRomanUrdu: boolean): string {
+  const uniqueCities = dedupeCities(cities);
+  if (uniqueCities.length === 0) {
+    return prefersRomanUrdu
+      ? "Maazrat, abhi city list available nahi hai. Thori dair baad try karein."
+      : "Sorry, city options are not available right now. Please try again shortly.";
+  }
+
+  const intro = prefersRomanUrdu
+    ? "Welcome! Sab se pehle apna city select karein:"
+    : "Welcome! First, please choose your city:";
+  const closing = prefersRomanUrdu
+    ? "Reply mein city ka naam bhej dein."
+    : "Reply with your city name.";
+
+  return [intro, ...uniqueCities.map((city, index) => `${index + 1}. ${city}`), closing].join("\n");
+}
+
+function findCitySelection(input: string, cities: string[]): string | null {
+  const uniqueCities = dedupeCities(cities);
+  const raw = input.trim();
+  const normalizedInput = normalizeCityValue(raw);
+  if (!normalizedInput || uniqueCities.length === 0) return null;
+
+  const optionMatch = raw.match(/^city[_\s-]?option[_\s-]?(\d+)$/i);
+  if (optionMatch) {
+    const index = Number.parseInt(optionMatch[1], 10) - 1;
+    if (index >= 0 && index < uniqueCities.length) {
+      return uniqueCities[index];
+    }
+  }
+
+  const numberMatch = normalizedInput.match(/\b(\d{1,2})\b/);
+  if (numberMatch) {
+    const index = Number.parseInt(numberMatch[1], 10) - 1;
+    if (index >= 0 && index < uniqueCities.length) {
+      return uniqueCities[index];
+    }
+  }
+
+  const exact = uniqueCities.find((city) => normalizeCityValue(city) === normalizedInput);
+  if (exact) return exact;
+
+  const fuzzy = uniqueCities.find((city) => {
+    const normalizedCity = normalizeCityValue(city);
+    return normalizedCity.includes(normalizedInput) || normalizedInput.includes(normalizedCity);
+  });
+
+  return fuzzy ?? null;
+}
+
+function normalizeCityValue(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function dedupeCities(cities: string[]): string[] {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+
+  for (const city of cities) {
+    const normalized = normalizeCityValue(city);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    deduped.push(city.trim());
+  }
+
+  return deduped;
+}
+
+async function buildCityBranchGroups(branches: BranchSummary[]): Promise<CityBranchGroup[]> {
+  if (branches.length === 0) return [];
+
+  const grouped = new Map<string, CityBranchGroup>();
+  for (const branch of branches) {
+    const rawCity = branch.city?.trim() || deriveCityFromAddress(branch.address);
+    const normalizedCity = normalizeCityValue(rawCity);
+    if (!normalizedCity) continue;
+
+    const existing = grouped.get(normalizedCity);
+    if (existing) {
+      existing.branches.push(branch);
+      continue;
+    }
+
+    grouped.set(normalizedCity, {
+      city: rawCity.trim(),
+      branches: [branch],
+    });
+  }
+
+  return Array.from(grouped.values()).sort((left, right) => left.city.localeCompare(right.city));
+}
+
+function deriveCityFromAddress(address: string | null | undefined): string {
+  const fallbackCity = process.env.NEXT_PUBLIC_APP_CITY?.trim() || "Wah Cantt";
+  if (!address) return fallbackCity;
+
+  const parts = address
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  return parts.length > 0 ? parts[parts.length - 1] : fallbackCity;
 }
 
 function buildInteractiveFallbackText(payload: {

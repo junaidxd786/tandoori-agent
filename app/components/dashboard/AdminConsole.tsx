@@ -12,6 +12,7 @@ type BranchSummary = {
   id: string;
   slug: string;
   name: string;
+  city: string;
   address: string;
   is_active: boolean;
   stats: {
@@ -31,10 +32,10 @@ type StaffSummary = {
   allowed_branch_ids: string[];
 };
 
-type BranchDraft = { name: string; slug: string; address: string; is_active: "active" | "inactive" };
+type BranchDraft = { name: string; slug: string; city: string; address: string; is_active: "active" | "inactive" };
 type StaffDraft = { full_name: string; email: string; password: string; role: "admin" | "branch_staff"; branch_id: string };
 
-const EMPTY_BRANCH: BranchDraft = { name: "", slug: "", address: "", is_active: "active" };
+const EMPTY_BRANCH: BranchDraft = { name: "", slug: "", city: "", address: "", is_active: "active" };
 const EMPTY_STAFF: StaffDraft = { full_name: "", email: "", password: "", role: "branch_staff", branch_id: "" };
 
 async function readJson<T>(response: Response) {
@@ -212,12 +213,15 @@ export default function AdminConsole() {
               </div>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4 md:grid-cols-4">
               <Field label="Branch Name">
                 <input value={branchDraft.name} onChange={(e) => setBranchDraft((c) => ({ ...c, name: e.target.value }))} placeholder="e.g. Downtown Outlet" className={inputCls} />
               </Field>
               <Field label="URL Slug">
                 <input value={branchDraft.slug} onChange={(e) => setBranchDraft((c) => ({ ...c, slug: e.target.value }))} placeholder="auto-generated if empty" className={inputCls} />
+              </Field>
+              <Field label="City">
+                <input value={branchDraft.city} onChange={(e) => setBranchDraft((c) => ({ ...c, city: e.target.value }))} placeholder="e.g. Lahore" className={inputCls} />
               </Field>
               <Field label="Status">
                 <select value={branchDraft.is_active} onChange={(e) => setBranchDraft((c) => ({ ...c, is_active: e.target.value as "active" | "inactive" }))} className={selectCls}>
@@ -254,7 +258,7 @@ export default function AdminConsole() {
                     setCreatingBranch(false);
                   }
                 }}
-                disabled={creatingBranch || !branchDraft.name.trim()}
+                disabled={creatingBranch || !branchDraft.name.trim() || !branchDraft.city.trim()}
                 className="h-[72px] min-w-[140px] rounded-xl bg-zinc-900 px-5 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-40 transition-colors flex items-center justify-center gap-2"
               >
                 {creatingBranch ? <Loader2 size={16} className="animate-spin" /> : <><Plus size={14} /> Create Branch</>}
@@ -311,7 +315,7 @@ export default function AdminConsole() {
                           {branch.is_active ? "Active" : "Inactive"}
                         </span>
                       </div>
-                      <p className="text-xs text-slate-400 truncate mt-0.5">{branch.address || "No address"}</p>
+                      <p className="text-xs text-slate-400 truncate mt-0.5">{branch.city} - {branch.address || "No address"}</p>
                     </div>
                     <div className="hidden md:flex items-center gap-3 text-xs text-slate-400 shrink-0">
                       <span className="rounded-md bg-slate-100 px-2.5 py-1 font-medium">{branch.stats.conversations} chats</span>
@@ -324,12 +328,15 @@ export default function AdminConsole() {
                   {/* Expanded Edit Panel */}
                   {isExpanded && (
                     <div className="px-6 pb-5 bg-slate-50/50 border-t border-slate-100">
-                      <div className="pt-5 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                      <div className="pt-5 grid gap-4 md:grid-cols-2 lg:grid-cols-5">
                         <Field label="Branch Name">
                           <input value={branch.name} onChange={(e) => setBranches((c) => c.map((b) => b.id === branch.id ? { ...b, name: e.target.value } : b))} className={inputCls} />
                         </Field>
                         <Field label="Slug">
                           <input value={branch.slug} onChange={(e) => setBranches((c) => c.map((b) => b.id === branch.id ? { ...b, slug: e.target.value } : b))} className={inputCls} />
+                        </Field>
+                        <Field label="City">
+                          <input value={branch.city} onChange={(e) => setBranches((c) => c.map((b) => b.id === branch.id ? { ...b, city: e.target.value } : b))} className={inputCls} />
                         </Field>
                         <Field label="Status">
                           <select value={branch.is_active ? "active" : "inactive"} onChange={(e) => setBranches((c) => c.map((b) => b.id === branch.id ? { ...b, is_active: e.target.value === "active" } : b))} className={selectCls}>
@@ -352,7 +359,7 @@ export default function AdminConsole() {
                           onClick={async () => {
                             setSavingBranchId(branch.id);
                             try {
-                              await readJson(await fetch(`/api/admin/branches/${branch.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: branch.name, slug: branch.slug, address: branch.address, is_active: branch.is_active }) }));
+                              await readJson(await fetch(`/api/admin/branches/${branch.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: branch.name, slug: branch.slug, city: branch.city, address: branch.address, is_active: branch.is_active }) }));
                               toast.success("Branch saved.");
                               await loadData();
                             } catch (error) {

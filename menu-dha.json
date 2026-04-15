@@ -1,0 +1,939 @@
+{
+  "items": [
+    {
+      "name": "MIX VEGETABLE",
+      "price": 1095,
+      "category": "VEGETABLE & DAAL",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "PALAK PANEER",
+      "price": 1095,
+      "category": "VEGETABLE & DAAL",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "DAAL MASH",
+      "price": 1095,
+      "category": "VEGETABLE & DAAL",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "NAAN / ROTI (P/H)",
+      "price": 195,
+      "category": "TANDOOR",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "NAAN BASKET",
+      "price": 850,
+      "category": "TANDOOR",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "ROGHNI NAAN",
+      "price": 220,
+      "category": "TANDOOR",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "GARLIC NAAN",
+      "price": 220,
+      "category": "TANDOOR",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "KALWANJI NAAN",
+      "price": 220,
+      "category": "TANDOOR",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TANDOORI PARATHA",
+      "price": 220,
+      "category": "TANDOOR",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "KANDHARI NAAN",
+      "price": 220,
+      "category": "TANDOOR",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "PINA COLADA",
+      "price": 695,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "STRAWBERRY COLADA",
+      "price": 695,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "KULFA OREO SHAKE",
+      "price": 695,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "BLUE LADY",
+      "price": 695,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "LIME LEMONADE",
+      "price": 550,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MINT MARGARITA",
+      "price": 595,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "COLD COFFEE WITH ICE-CREAM",
+      "price": 795,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "FRESH JUICES (SEASONAL)",
+      "price": 725,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MINERAL WATER (LARGE)",
+      "price": 250,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MINERAL WATER (SMALL)",
+      "price": 125,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "FRESH LIME WITH SOFT DRINK",
+      "price": 325,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "LASSI GLASS (SALTISH/SWEET)",
+      "price": 425,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "SOFT DRINK (TIN)",
+      "price": 240,
+      "category": "COLD BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "BLACK TEA",
+      "price": 245,
+      "category": "HOT BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "GREEN TEA",
+      "price": 225,
+      "category": "HOT BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "PESHAWARI KAHWA WITH GURR",
+      "price": 230,
+      "category": "HOT BEVERAGES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TANDOORI SPECIAL ICE-CREAM",
+      "price": 815,
+      "category": "DESSERTS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TUTTI FRUITTI ICE-CREAM",
+      "price": 695,
+      "category": "DESSERTS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "PLAIN ICE-CREAM (2 SCOOPS)",
+      "price": 540,
+      "category": "DESSERTS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "COOKIE CRUNCH ICE-CREAM",
+      "price": 690,
+      "category": "DESSERTS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "KHEER THOOTHI",
+      "price": 295,
+      "category": "DESSERTS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "KULFI",
+      "price": 170,
+      "category": "DESSERTS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TANDOORI DUM BIRYANI (MUTTON)",
+      "price": 2499,
+      "category": "NEW ARRIVAL",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TANDOORI DUM BIRYANI (CHICKEN)",
+      "price": 1799,
+      "category": "NEW ARRIVAL",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TANDOORI CHARGHA",
+      "price": 1799,
+      "category": "NEW ARRIVAL",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "DUM HANDI (LAMB)",
+      "price": 4595,
+      "category": "NEW ARRIVAL",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "DUM HANDI (MUTTON)",
+      "price": 4595,
+      "category": "NEW ARRIVAL",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "DUM HANDI (CHICKEN)",
+      "price": 2995,
+      "category": "NEW ARRIVAL",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "BBQ WINGS",
+      "price": 995,
+      "category": "STARTERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "HONEY WINGS",
+      "price": 1050,
+      "category": "STARTERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "SPICY WINGS",
+      "price": 995,
+      "category": "STARTERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHEESE NAAN",
+      "price": 675,
+      "category": "STARTERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "FRENCH FRIES",
+      "price": 585,
+      "category": "STARTERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "FISH CRACKERS",
+      "price": 585,
+      "category": "STARTERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "RUSSIAN SALAD",
+      "price": 995,
+      "category": "SALADS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "KACHUMAR SALAD",
+      "price": 495,
+      "category": "SALADS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "FRESH GREEN SALAD",
+      "price": 425,
+      "category": "SALADS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MINT RAITA",
+      "price": 330,
+      "category": "SALADS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "RAITA",
+      "price": 295,
+      "category": "SALADS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TANDOORI SPECIAL SOUP",
+      "price": 1925,
+      "category": "SOUPS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "HOT & SOUR SOUP",
+      "price": 1825,
+      "category": "SOUPS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN CORN SOUP",
+      "price": 1785,
+      "category": "SOUPS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "THAI SOUP",
+      "price": 1665,
+      "category": "SOUPS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN VEGETABLE SOUP",
+      "price": 1695,
+      "category": "SOUPS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN GRILLED SANDWICH",
+      "price": 945,
+      "category": "SANDWICHES & BURGERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CLUB SANDWICH",
+      "price": 995,
+      "category": "SANDWICHES & BURGERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN SANDWICH",
+      "price": 850,
+      "category": "SANDWICHES & BURGERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "GRILLED CHICKEN BURGER",
+      "price": 995,
+      "category": "SANDWICHES & BURGERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "ZINGER BURGER",
+      "price": 950,
+      "category": "SANDWICHES & BURGERS",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TANDOORI SPECIAL STEAK",
+      "price": 2295,
+      "category": "CONTINENTAL CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TARRAGON STEAK",
+      "price": 2195,
+      "category": "CONTINENTAL CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUSHROOM STEAK",
+      "price": 2195,
+      "category": "CONTINENTAL CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "PEPPER STEAK",
+      "price": 2195,
+      "category": "CONTINENTAL CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MEXICAN STEAK",
+      "price": 2195,
+      "category": "CONTINENTAL CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TANDOORI SPECIAL FISH",
+      "price": 2795,
+      "category": "SEA FOOD",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "GRILLED FISH",
+      "price": 2495,
+      "category": "SEA FOOD",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "FRIED FISH & CHIPS (3 PCS)",
+      "price": 2495,
+      "category": "SEA FOOD",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "FINGER FISH (8 PCS)",
+      "price": 2495,
+      "category": "SEA FOOD",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "FISH CHILLI DRY",
+      "price": 2295,
+      "category": "SEA FOOD",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN CHILLI DRY",
+      "price": 2050,
+      "category": "CHINESE CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "BEEF CHILLI DRY",
+      "price": 2295,
+      "category": "CHINESE CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN GARLIC",
+      "price": 2050,
+      "category": "CHINESE CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN SHASHLIK",
+      "price": 2050,
+      "category": "CHINESE CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "KUNG PAO CHICKEN",
+      "price": 2050,
+      "category": "CHINESE CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MONGOLIAN CHICKEN",
+      "price": 2050,
+      "category": "CHINESE CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN OYSTER SAUCE",
+      "price": 2050,
+      "category": "CHINESE CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "SZECHUAN CHICKEN",
+      "price": 2050,
+      "category": "CHINESE CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN MANCHURIAN",
+      "price": 2050,
+      "category": "CHINESE CUISINE",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "COMBO 1",
+      "price": 1795,
+      "category": "CHINESE CUISINE",
+      "description": "EGG FRIED RICE, CHICKEN ALMOND, DRUM STICK",
+      "is_available": true
+    },
+    {
+      "name": "COMBO 2",
+      "price": 1795,
+      "category": "CHINESE CUISINE",
+      "description": "VEGETABLE FRIED RICE, CHICKEN CHILLI DRY, FINGER FISH",
+      "is_available": true
+    },
+    {
+      "name": "COMBO 3",
+      "price": 1795,
+      "category": "CHINESE CUISINE",
+      "description": "VEGETABLE FRIED RICE, BEEF CHILLI DRY, FRIED WINGS",
+      "is_available": true
+    },
+    {
+      "name": "TANDOORI SPECIAL BBQ PLATTER",
+      "price": 12999,
+      "category": "BBQ",
+      "description": "Mutton Ribs, Fish Tikka, Qalmi Tikka, Malai Boti, Chicken Boti, Gola Kabab, Kabab (Chicken, Beef), Kabuli Pulao, Raitas, Mint & BBQ Sauce",
+      "is_available": true
+    },
+    {
+      "name": "CHEF SHER KHAN PLATTER",
+      "price": 8999,
+      "category": "BBQ",
+      "description": "Mutton Ribs, Fish Tikka, Qalmi Tikka, Malai Boti, Chicken Boti, Gola Kabab, Kabab (Chicken, Beef), Kabuli Pulao, Raitas, Mint & BBQ Sauce",
+      "is_available": true
+    },
+    {
+      "name": "MUTTON RIBS",
+      "price": 4495,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON TIKKA (24 PCS)",
+      "price": 3795,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON CHOPS (6 PCS)",
+      "price": 3895,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON KABAB (6 PCS)",
+      "price": 2395,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "BEEF KABAB (6 PCS)",
+      "price": 1895,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MALAI KABAB (6 PCS)",
+      "price": 1895,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN GOLA KABAB (6 PCS)",
+      "price": 1875,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN RESHMI KABAB (6 PCS)",
+      "price": 1825,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN KABAB (6 PCS)",
+      "price": 1725,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN MALAI BOTI B/L (12 PCS)",
+      "price": 2095,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN BOTI (12 PCS)",
+      "price": 1795,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "SPECIAL CHICKEN BOTI B/L (12 PCS)",
+      "price": 1995,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN CHATKHARA BOTI (12 PCS)",
+      "price": 1895,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN BIHARI BOTI B/L (12 PCS)",
+      "price": 1895,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "QALMI TIKKA (4 PCS)",
+      "price": 1995,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN TIKKA",
+      "price": 595,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "FISH TIKKA (8 PCS)",
+      "price": 2595,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TURKISH KABAB (6 PCS)",
+      "price": 1795,
+      "category": "BBQ",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TANDOORI SPECIAL RICE",
+      "price": 1495,
+      "category": "RICE & NOODLES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "KABULI PULAO",
+      "price": 1795,
+      "category": "RICE & NOODLES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN BIRYANI",
+      "price": 1195,
+      "category": "RICE & NOODLES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN FRIED RICE",
+      "price": 1495,
+      "category": "RICE & NOODLES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN MASALA RICE",
+      "price": 1400,
+      "category": "RICE & NOODLES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "EGG FRIED RICE",
+      "price": 1450,
+      "category": "RICE & NOODLES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "VEGETABLE FRIED RICE",
+      "price": 1295,
+      "category": "RICE & NOODLES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "STEAM RICE",
+      "price": 895,
+      "category": "RICE & NOODLES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN CHOWMEIN",
+      "price": 1695,
+      "category": "RICE & NOODLES",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN CREAMY HANDI (BONELESS)",
+      "price": 2595,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN HANDI (BONELESS)",
+      "price": 2595,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN MULTANI HANDI",
+      "price": 2645,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN KARAHI (FULL)",
+      "price": 2495,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN KARAHI (HALF)",
+      "price": 1395,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN SHAHJAHANI",
+      "price": 1950,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN HARI MIRCH",
+      "price": 1995,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN HYDERABADI",
+      "price": 1950,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN GINGER",
+      "price": 2050,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MURGH KASHMIRI",
+      "price": 1950,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "TAWA CHICKEN",
+      "price": 1950,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN JALFREZI",
+      "price": 1950,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "CHICKEN STEAM ROAST",
+      "price": 1995,
+      "category": "PAKISTANI CHICKEN",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON HANDI",
+      "price": 4495,
+      "category": "PAKISTANI MUTTON",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON MULTANI HANDI",
+      "price": 4495,
+      "category": "PAKISTANI MUTTON",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON KARAHI (FULL)",
+      "price": 4495,
+      "category": "PAKISTANI MUTTON",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON KARAHI (HALF)",
+      "price": 2595,
+      "category": "PAKISTANI MUTTON",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON HARI MIRCH",
+      "price": 2675,
+      "category": "PAKISTANI MUTTON",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON BRAIN MASALA",
+      "price": 2395,
+      "category": "PAKISTANI MUTTON",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON GINGER",
+      "price": 2695,
+      "category": "PAKISTANI MUTTON",
+      "description": null,
+      "is_available": true
+    },
+    {
+      "name": "MUTTON JUMBO DRY",
+      "price": 4595,
+      "category": "PAKISTANI MUTTON",
+      "description": null,
+      "is_available": true
+    }
+  ],
+  "skipped": [
+    {
+      "raw_text": "ALL SOUPS ARE ALSO SERVED IN SINGLE SERVING @RS.495",
+      "reason": "other"
+    },
+    {
+      "raw_text": "ALL CHINESE DISHES SERVED IN SEA FOOD ALSO WILL BE CHARGE @ RS. 375 EXTRA",
+      "reason": "other"
+    },
+    {
+      "raw_text": "*5% SERVICE CHARGES WILL BE APPLICABLE ON DINE-IN.",
+      "reason": "other"
+    },
+    {
+      "raw_text": "*ALL PRICES ARE SUBJECT TO GOVERNMENT TAXES.",
+      "reason": "other"
+    }
+  ]
+}

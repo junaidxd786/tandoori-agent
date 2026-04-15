@@ -5,6 +5,7 @@ import { requireAdminApiSession } from "@/lib/admin-request";
 type BranchBody = {
   name?: string;
   slug?: string | null;
+  city?: string;
   address?: string;
   is_active?: boolean;
 };
@@ -35,6 +36,7 @@ export async function POST(req: NextRequest) {
     const branch = await createBranch({
       name: body.name ?? "",
       slug: body.slug ?? null,
+      city: body.city ?? "",
       address: body.address ?? "",
       isActive: body.is_active ?? true,
     });

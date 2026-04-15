@@ -116,7 +116,7 @@ async function loadAllowedBranches(userId: string, role: StaffRole): Promise<Bra
   if (role === "admin") {
     const { data, error } = await supabaseAdmin
       .from("branches")
-      .select("id, slug, name, address")
+      .select("id, slug, name, city, address")
       .eq("is_active", true)
       .order("name", { ascending: true });
 
@@ -130,7 +130,7 @@ async function loadAllowedBranches(userId: string, role: StaffRole): Promise<Bra
 
   const { data, error } = await supabaseAdmin
     .from("staff_branch_access")
-    .select("branch_id, branches!inner(id, slug, name, address)")
+    .select("branch_id, branches!inner(id, slug, name, city, address)")
     .eq("user_id", userId)
     .order("branch_id", { ascending: true });
 
@@ -145,10 +145,11 @@ async function loadAllowedBranches(userId: string, role: StaffRole): Promise<Bra
       return branch
         ? {
             id: branch.id,
-            slug: branch.slug,
-            name: branch.name,
-            address: branch.address,
-          }
+          slug: branch.slug,
+          name: branch.name,
+          city: branch.city,
+          address: branch.address,
+        }
         : null;
     })
     .filter((branch): branch is BranchSummary => branch != null);

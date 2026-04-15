@@ -562,6 +562,14 @@ begin
   end if;
 end $$;
 
+-- Branch city mapping for city -> branch conversational flow
+alter table branches add column if not exists city text not null default 'Wah Cantt';
+update branches as b
+set city = coalesce(nullif(trim(rs.city), ''), b.city)
+from restaurant_settings as rs
+where rs.branch_id = b.id;
+create index if not exists idx_branches_city_active on branches(lower(city), is_active);
+
 create or replace function match_menu_items_by_embedding(
   branch_uuid uuid,
   query_embedding vector(1536),

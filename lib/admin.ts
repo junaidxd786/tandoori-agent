@@ -5,6 +5,7 @@ export type AdminBranchSummary = {
   id: string;
   slug: string;
   name: string;
+  city: string;
   address: string;
   is_active: boolean;
   created_at: string;
@@ -48,6 +49,7 @@ type UpdateStaffInput = {
 type BranchMutationInput = {
   name: string;
   slug?: string | null;
+  city: string;
   address: string;
   isActive?: boolean;
 };
@@ -115,7 +117,7 @@ export async function listBranchesWithStats(): Promise<AdminBranchSummary[]> {
     await Promise.all([
       supabaseAdmin
         .from("branches")
-        .select("id, slug, name, address, is_active, created_at, updated_at")
+        .select("id, slug, name, city, address, is_active, created_at, updated_at")
         .order("name", { ascending: true }),
       supabaseAdmin.from("conversations").select("branch_id, has_unread"),
       supabaseAdmin.from("orders").select("branch_id, status"),
@@ -148,11 +150,13 @@ export async function listBranchesWithStats(): Promise<AdminBranchSummary[]> {
 
 export async function createBranch(input: BranchMutationInput) {
   const name = input.name.trim();
+  const city = input.city.trim();
   const address = input.address.trim();
   const slug = slugifyBranchName(input.slug?.trim() || input.name);
 
   if (!name) throw new Error("Branch name is required.");
   if (!slug) throw new Error("Branch slug is required.");
+  if (!city) throw new Error("Branch city is required.");
   if (!address) throw new Error("Branch address is required.");
 
   const { data, error } = await supabaseAdmin
@@ -160,10 +164,11 @@ export async function createBranch(input: BranchMutationInput) {
     .insert({
       name,
       slug,
+      city,
       address,
       is_active: input.isActive ?? true,
     })
-    .select("id, slug, name, address, is_active, created_at, updated_at")
+    .select("id, slug, name, city, address, is_active, created_at, updated_at")
     .single();
 
   if (error || !data) {
@@ -172,7 +177,7 @@ export async function createBranch(input: BranchMutationInput) {
 
   const { error: settingsError } = await supabaseAdmin
     .from("restaurant_settings")
-    .insert({ branch_id: data.id })
+    .insert({ branch_id: data.id, city })
     .select("branch_id")
     .maybeSingle();
 
@@ -185,11 +190,13 @@ export async function createBranch(input: BranchMutationInput) {
 
 export async function updateBranch(branchId: string, input: BranchMutationInput) {
   const name = input.name.trim();
+  const city = input.city.trim();
   const address = input.address.trim();
   const slug = slugifyBranchName(input.slug?.trim() || input.name);
 
   if (!name) throw new Error("Branch name is required.");
   if (!slug) throw new Error("Branch slug is required.");
+  if (!city) throw new Error("Branch city is required.");
   if (!address) throw new Error("Branch address is required.");
 
   const { data, error } = await supabaseAdmin
@@ -197,16 +204,28 @@ export async function updateBranch(branchId: string, input: BranchMutationInput)
     .update({
       name,
       slug,
+      city,
       address,
       is_active: input.isActive ?? true,
       updated_at: new Date().toISOString(),
     })
     .eq("id", branchId)
-    .select("id, slug, name, address, is_active, created_at, updated_at")
+    .select("id, slug, name, city, address, is_active, created_at, updated_at")
     .single();
 
   if (error || !data) {
     throw error ?? new Error("Failed to update branch.");
+  }
+
+  const { error: settingsError } = await supabaseAdmin
+    .from("restaurant_settings")
+    .update({
+      city,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("branch_id", branchId);
+  if (settingsError) {
+    throw settingsError;
   }
 
   return data;

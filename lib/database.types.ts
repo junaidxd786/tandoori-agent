@@ -38,6 +38,7 @@ export interface Database {
           id: string;
           slug: string;
           name: string;
+          city: string;
           address: string;
           is_active: boolean;
           created_at: string;
@@ -47,6 +48,7 @@ export interface Database {
           id?: string;
           slug: string;
           name: string;
+          city: string;
           address: string;
           is_active?: boolean;
           created_at?: string;
