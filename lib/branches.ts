@@ -119,14 +119,23 @@ export function findBranchSelection(input: string, branches: BranchSummary[]): B
     }
   }
 
+  // Avoid fuzzy-matching very short inputs like "hi" against branch addresses
+  // (e.g., "Kohinoor City" contains "hi").
+  const allowFuzzy = normalized.length >= 4;
+
   const exact = branches.find((branch) => {
     const values = [branch.name, branch.slug, branch.address].map((value) => normalizeBranchValue(value));
     return values.some((value) => value === normalized);
   });
   if (exact) return exact;
 
+  if (!allowFuzzy) {
+    return null;
+  }
+
   const fuzzy = branches.find((branch) => {
-    const values = [branch.name, branch.slug, branch.address].map((value) => normalizeBranchValue(value));
+    // For fuzzy matching, prefer stable identifiers (name/slug) and avoid address substring matches.
+    const values = [branch.name, branch.slug].map((value) => normalizeBranchValue(value));
     return values.some((value) => value.includes(normalized) || normalized.includes(value));
   });
 
