@@ -831,10 +831,12 @@ async function drainConversationQueue(conversation: ConversationRow) {
         isOpenNow = settings.is_accepting_orders && isWithinOperatingHours(settings.opening_time, settings.closing_time);
       }
       // Detect message type for optimization
-      const messageType = detectMessageType(nextMessage.content.toLowerCase().trim());
+      const normalizedIncoming = nextMessage.content.toLowerCase().trim();
+      const messageType = detectMessageType(normalizedIncoming);
+      const hasDirectMenuSignal = /(menu|show.*menu|list.*items?|category|categories|price|rates?|kya.*hai|dikhao)/.test(normalizedIncoming);
 
-      // Only load expensive resources for complex/menu messages
-      const needsFullProcessing = messageType === "complex" || messageType === "menu_related";
+      // Load menu when direct menu signals exist, even if mixed with greetings like "hi menu".
+      const needsFullProcessing = messageType === "complex" || messageType === "menu_related" || hasDirectMenuSignal;
       if (needsFullProcessing && (!cachedMenuItems || Date.now() - menuLoadedAt > 5 * 60_000)) {
         cachedMenuItems = await getMenuCatalog(conversation.branch_id);
         menuLoadedAt = Date.now();

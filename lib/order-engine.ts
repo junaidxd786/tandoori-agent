@@ -17,6 +17,21 @@ export type MessageType =
   | "complex";
 
 export function detectMessageType(normalizedText: string): MessageType {
+  // Status requests
+  if (/\b(where|status|track|location|ready|prepared|delivered|arrived|time|eta|when)\b.*\b(order|food|delivery)\b/i.test(normalizedText) ||
+      /\b(order|food|delivery)\b.*\b(where|status|track|location|ready|prepared|delivered|arrived|time|eta|when)\b/i.test(normalizedText)) {
+    return "status_request";
+  }
+
+  // Menu related - checked before greetings so mixed messages like "hi menu"
+  // still hydrate menu data and don't get downgraded to greeting-only.
+  const hasMenuSignal =
+      /\b(menu|item|dish|food|drink|beverage|price|cost|available|category|biryani|karahi|bbq|burger|pizza|roll|fries)\b/i.test(normalizedText) ||
+      /\d+\s*(piece|pcs|kg|g|liter|l|ml|cup|plate|bowl)/i.test(normalizedText);
+  if (hasMenuSignal) {
+    return "menu_related";
+  }
+
   // Greetings
   if (/\b(assalam|aoa|salam|hello|hi|hey|good\s+(morning|afternoon|evening)|namaste|namaskar)\b/i.test(normalizedText)) {
     return "greeting";
@@ -26,20 +41,6 @@ export function detectMessageType(normalizedText: string): MessageType {
   if (/\b(ok|okay|yes|no|thanks|thank\s+you|shukriya|theek|fine|good|alright|sure|haan|na|nahi)\b/i.test(normalizedText) &&
       normalizedText.split(" ").length <= 3) {
     return "acknowledgment";
-  }
-
-  // Status requests
-  if (/\b(where|status|track|location|ready|prepared|delivered|arrived|time|eta|when)\b.*\b(order|food|delivery)\b/i.test(normalizedText) ||
-      /\b(order|food|delivery)\b.*\b(where|status|track|location|ready|prepared|delivered|arrived|time|eta|when)\b/i.test(normalizedText)) {
-    return "status_request";
-  }
-
-  // Menu related - avoid classifying every long sentence as menu intent.
-  if (
-      /\b(menu|item|dish|food|drink|beverage|price|cost|available|category|biryani|karahi|bbq|burger|pizza|roll|fries)\b/i.test(normalizedText) ||
-      /\d+\s*(piece|pcs|kg|g|liter|l|ml|cup|plate|bowl)/i.test(normalizedText)
-  ) {
-    return "menu_related";
   }
 
   return "complex";
@@ -626,7 +627,11 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   // For complex messages, we need full AI processing with menu data
   // For menu-related messages, we can optimize by loading menu data
   // For simple messages that reach here, we still need basic processing
-  const needsFullMenuData = messageType === "complex" || messageType === "menu_related";
+  const needsFullMenuData =
+    messageType === "complex" ||
+    messageType === "menu_related" ||
+    isLikelyMenuRequest(normalizedText) ||
+    context.menuItems.length > 0;
   const menuItems = needsFullMenuData ? getAvailableMenuItems(context.menuItems) : [];
 
   const interpretation = await getOrderTurnInterpretation({
@@ -939,7 +944,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     return replyDecision(
       prefersRomanUrdu
         ? "Pichli options expire ho chuki hain. *menu* likhein, main fresh list bhej deta hoon."
-        : "Those previously shown options have expired. Send *menu* and I’ll share a fresh list.",
+        : "Those previously shown options have expired. Send *menu* and I'll share a fresh list.",
       withPreferredLanguage(
         {
           last_presented_options: null,
@@ -1611,6 +1616,16 @@ function handleLogisticsAndFallback(params: {
     );
   }
 
+  if (interpretation.intent === "greeting") {
+    return replyDecision(
+      prefersRomanUrdu
+        ? "Ji, main yahan hoon. Aap *menu* likh dein ya item ka naam quantity ke sath bhej dein."
+        : "Hi, I am here to help. You can send *menu* or share an item name with quantity.",
+      withPreferredLanguage({}, preferredLanguage),
+      trace,
+    );
+  }
+
   if (interpretation.intent === "chitchat" || interpretation.intent === "unknown") {
     return {
       kind: "fallback",
@@ -1621,8 +1636,8 @@ function handleLogisticsAndFallback(params: {
 
   return replyDecision(
     prefersRomanUrdu
-      ? "Aap item ka naam aur quantity bhej dein. Misal: *2 Chicken Biryani*."
-      : "Send item name with quantity, for example: *2 Chicken Biryani*.",
+      ? "Aap *menu* likh dein ya item ka naam aur quantity bhej dein. Misal: *2 Chicken Biryani*."
+      : "You can send *menu* or item name with quantity, for example: *2 Chicken Biryani*.",
     withPreferredLanguage({ workflow_step: "collecting_items" }, preferredLanguage),
     trace,
   );
@@ -1836,7 +1851,7 @@ function isExplicitNo(text: string): boolean {
 }
 
 function isLikelyMenuRequest(text: string): boolean {
-  return /(menu|show.*menu|what.*have|list.*items|kya.*hai|dikhao)/.test(text);
+  return /(menu|show.*menu|what.*have|list.*items?|kya.*hai|dikhao|category|categories|price|rates?)/.test(text);
 }
 
 function isSearchLikeDisambiguationMessage(normalizedText: string): boolean {
@@ -2119,8 +2134,8 @@ function buildCategoryListReply(
   if (categories.length === 0) {
     return {
       text: romanUrdu
-        ? "Is waqt menu update ho raha hai. Thori dair baad try karein."
-        : "The menu is being updated right now. Please try again shortly.",
+        ? "Is branch ka menu filhal available nahi lag raha. *menu* dobara try karein ya branch confirm kar dein."
+        : "I could not find a live menu for this branch right now. Please try *menu* again or confirm your branch.",
     };
   }
 
