@@ -831,10 +831,53 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     );
   }
 
+  // Handle category interactive commands globally, even if user is currently
+  // inside a category item list. This prevents payloads like
+  // "category_more_2" from being misread as item option "2".
+  const requestedCategoryPage = parseCategoryMorePage(rawText);
+  if (requestedCategoryPage) {
+    const categoryReply = buildCategoryListReply(menuItems, prefersRomanUrdu, requestedCategoryPage);
+    return replyDecision(
+      categoryReply.text,
+      withPreferredLanguage(
+        {
+          workflow_step: "collecting_items",
+          last_presented_category: "__category_list__",
+          last_presented_options: null,
+          last_presented_options_at: null,
+        },
+        preferredLanguage,
+      ),
+      trace,
+      categoryReply.interactiveList,
+    );
+  }
+
+  const hasCategoryOptionPayload = /^category[_\s-]?option[_\s-]?\d{1,2}$/i.test(rawText.trim());
+  if (hasCategoryOptionPayload) {
+    const category = findCategoryRequest(rawText, menuItems);
+    if (category) {
+      const categoryReply = buildCategoryItemsReply(category, menuItems, prefersRomanUrdu);
+      return replyDecision(
+        categoryReply.text,
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_category: category,
+            last_presented_options: categoryReply.selectableItems,
+            last_presented_options_at: categoryReply.selectableItems.length > 0 ? new Date().toISOString() : null,
+          },
+          preferredLanguage,
+        ),
+        trace,
+      );
+    }
+  }
+
   if (state.last_presented_category === "__category_list__") {
-    const requestedCategoryPage = parseCategoryMorePage(rawText);
-    if (requestedCategoryPage) {
-      const categoryReply = buildCategoryListReply(menuItems, prefersRomanUrdu, requestedCategoryPage);
+    const listRequestedPage = parseCategoryMorePage(rawText);
+    if (listRequestedPage) {
+      const categoryReply = buildCategoryListReply(menuItems, prefersRomanUrdu, listRequestedPage);
       return replyDecision(
         categoryReply.text,
         withPreferredLanguage(
