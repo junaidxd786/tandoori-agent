@@ -106,6 +106,7 @@ export default function MenuPage() {
   const [importWarnings, setImportWarnings] = useState<ImportWarning[]>([]);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [jsonUploading, setJsonUploading] = useState(false);
   const [bulkSaving, setBulkSaving] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
@@ -307,6 +308,92 @@ export default function MenuPage() {
     }
   };
 
+  const handleJsonUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setJsonUploading(true);
+    try {
+      if (selectedBranchId === "all") {
+        throw new Error("Please choose a single branch before uploading a menu.");
+      }
+
+      const rawText = await file.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawText) as unknown;
+      } catch {
+        throw new Error("That file is not valid JSON.");
+      }
+
+      const rawItems: unknown =
+        Array.isArray(parsed)
+          ? parsed
+          : typeof parsed === "object" && parsed !== null
+            ? // Support common wrappers: { items: [...] } or { menu: [...] }
+              (parsed as Record<string, unknown>).items ?? (parsed as Record<string, unknown>).menu
+            : null;
+
+      if (!Array.isArray(rawItems)) {
+        throw new Error("Expected a JSON array of menu items (or { items: [...] }).");
+      }
+
+      const normalized = normalizeItems(
+        rawItems.map((item) => {
+          if (typeof item !== "object" || item === null) {
+            return { name: "", price: NaN, category: "", is_available: true };
+          }
+          const obj = item as Record<string, unknown>;
+          return {
+            name: typeof obj.name === "string" ? obj.name : "",
+            price: typeof obj.price === "number" ? obj.price : Number(obj.price),
+            category: typeof obj.category === "string" ? obj.category : "",
+            is_available: typeof obj.is_available === "boolean" ? obj.is_available : true,
+          };
+        }),
+      );
+
+      if (normalized.items.length === 0) {
+        throw new Error("No valid items found in the JSON file.");
+      }
+
+      const response = await fetch(`/api/menu?branch_id=${encodeURIComponent(selectedBranchId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: normalized.items.map((item) => ({
+            name: item.name,
+            price: item.price,
+            category: item.category,
+            is_available: item.is_available,
+          })),
+          replaceAll: replaceExisting,
+        }),
+      });
+
+      const body = await response.json();
+      if (!response.ok) {
+        const issues = body.issues?.map((issue: { message: string }) => issue.message).join(" ");
+        throw new Error(issues || body.error || "Failed to save menu");
+      }
+
+      setImportPreview([]);
+      setImportWarnings([]);
+      showToast(
+        replaceExisting
+          ? `JSON uploaded. Replaced catalog with ${normalized.items.length} items.`
+          : `JSON uploaded. Applied ${normalized.items.length} items.`,
+        "success",
+      );
+      await loadMenu();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "JSON upload failed.", "error");
+    } finally {
+      setJsonUploading(false);
+      event.target.value = "";
+    }
+  };
+
   return (
     <div className="space-y-6 pb-10">
       {selectedBranchId === "all" ? (
@@ -335,6 +422,22 @@ export default function MenuPage() {
             {processing ? <Loader2 className="mr-2 h-4 w-4 animate-spin text-brand" /> : <UploadCloud size={16} className="mr-2 text-slate-500" />}
             {processing ? "Scanning..." : "Upload Photo"}
             <input type="file" accept="image/*" onChange={handlePhotoUpload} className="hidden" disabled={processing} />
+          </label>
+
+          <label className="flex cursor-pointer items-center justify-center rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50">
+            {jsonUploading ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin text-brand" />
+            ) : (
+              <UploadCloud size={16} className="mr-2 text-slate-500" />
+            )}
+            {jsonUploading ? "Saving JSON..." : "Upload JSON"}
+            <input
+              type="file"
+              accept="application/json,.json"
+              onChange={handleJsonUpload}
+              className="hidden"
+              disabled={jsonUploading || processing}
+            />
           </label>
 
           <button onClick={() => setItems((prev) => [{ name: "", price: 0, category: "", is_available: true }, ...prev])} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50">
