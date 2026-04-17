@@ -1860,6 +1860,12 @@ function isExplicitNo(text: string): boolean {
 }
 
 function isLikelyMenuRequest(text: string): boolean {
+  // Keep interactive category controls on their dedicated path.
+  // Otherwise commands like "category_option_2" get treated as a generic
+  // menu request and the bot keeps re-sending the category list.
+  if (/^category\s+option\s+\d{1,2}$/.test(text)) return false;
+  if (/^category\s+more\s+\d{1,2}$/.test(text)) return false;
+
   return /(menu|show.*menu|what.*have|list.*items?|kya.*hai|dikhao|category|categories|price|rates?)/.test(text);
 }
 
