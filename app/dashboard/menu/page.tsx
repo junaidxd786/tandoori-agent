@@ -10,6 +10,7 @@ interface MenuItem {
   name: string;
   price: number;
   category: string;
+  description?: string | null;
   is_available: boolean;
   _saving?: boolean;
   _deleting?: boolean;
@@ -35,6 +36,7 @@ function normalizeItems(items: MenuItem[]) {
     const name = normalizeWhitespace(item.name);
     const price = Number(item.price);
     const key = name.toLowerCase();
+    const description = item.description ? normalizeWhitespace(item.description) : null;
 
     if (!name) {
       warnings.push({ code: "invalid_name", message: "One extracted item was skipped because its name was empty." });
@@ -57,6 +59,7 @@ function normalizeItems(items: MenuItem[]) {
       name,
       price,
       category: normalizeCategory(item.category),
+      description,
       is_available: item.is_available ?? true,
     });
   });
@@ -75,6 +78,7 @@ function mergeImportedItems(currentItems: MenuItem[], importedItems: MenuItem[])
         name: item.name,
         price: item.price,
         category: item.category,
+        description: item.description ?? null,
         is_available: item.is_available,
       });
     } else {
@@ -341,13 +345,15 @@ export default function MenuPage() {
       const normalized = normalizeItems(
         rawItems.map((item) => {
           if (typeof item !== "object" || item === null) {
-            return { name: "", price: NaN, category: "", is_available: true };
+            return { name: "", price: NaN, category: "", description: null, is_available: true };
           }
           const obj = item as Record<string, unknown>;
           return {
             name: typeof obj.name === "string" ? obj.name : "",
             price: typeof obj.price === "number" ? obj.price : Number(obj.price),
             category: typeof obj.category === "string" ? obj.category : "",
+            description:
+              obj.description === null ? null : typeof obj.description === "string" ? obj.description : null,
             is_available: typeof obj.is_available === "boolean" ? obj.is_available : true,
           };
         }),
@@ -365,6 +371,7 @@ export default function MenuPage() {
             name: item.name,
             price: item.price,
             category: item.category,
+            description: item.description ?? null,
             is_available: item.is_available,
           })),
           replaceAll: replaceExisting,
