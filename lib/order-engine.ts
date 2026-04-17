@@ -797,7 +797,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   ) {
     const queryHints = buildMenuQueryHints(rawText, normalizedText);
     if (queryHints.length > 0) {
-      const matchedMenuItems = pickMenuSuggestionsForQuery(queryHints[0], menuItems, context.semanticMatches, 8);
+      const matchedMenuItems = pickMenuSuggestionsForQuery(queryHints[0], menuItems, context.semanticMatches, 10);
       if (matchedMenuItems.length > 0) {
         return replyDecision(
           buildItemMatchesReply(queryHints[0], matchedMenuItems, prefersRomanUrdu),
@@ -1752,11 +1752,11 @@ function pickMenuSuggestionsForQuery(
   query: string,
   menuItems: MenuCatalogItem[],
   semanticMatches: SemanticMenuMatch[],
-  limit = 8,
+  limit = 10,
 ): MenuCatalogItem[] {
   const semanticCandidates = semanticMatches
-    .filter((item) => (item.similarity ?? 0) >= 0.58)
-    .slice(0, limit)
+    .filter((item) => (item.similarity ?? 0) >= 0.5)
+    .slice(0, Math.max(limit * 2, 20))
     .map((item) => ({
       id: item.id,
       name: item.name,
@@ -1764,11 +1764,20 @@ function pickMenuSuggestionsForQuery(
       category: item.category ?? null,
       is_available: item.is_available ?? true,
     }));
-  if (semanticCandidates.length > 0) {
-    return semanticCandidates;
+  const lexicalCandidates = findLikelyMenuSuggestions(query, menuItems, Math.max(limit * 2, 20))
+    .filter((item) => itemSimilarityScore(normalizeText(query), normalizeText(item.name)) >= 0.35);
+  const mergedById = new Map<string, MenuCatalogItem>();
+  for (const item of [...semanticCandidates, ...lexicalCandidates]) {
+    if (!mergedById.has(item.id)) {
+      mergedById.set(item.id, item);
+    }
+  }
+  const merged = [...mergedById.values()];
+  if (merged.length > 0) {
+    return merged.slice(0, limit);
   }
 
-  return findLikelyMenuSuggestions(query, menuItems, limit).filter((item) => itemSimilarityScore(normalizeText(query), normalizeText(item.name)) >= 0.5);
+  return lexicalCandidates.slice(0, limit);
 }
 
 function applyCheckoutSignalsToState(params: {
@@ -2382,9 +2391,16 @@ function buildAmbiguousItemReply(query: string, options: MenuCatalogItem[], roma
 
 function buildItemMatchesReply(query: string, options: MenuCatalogItem[], romanUrdu: boolean): string {
   const lines = options.slice(0, 10).map((item, index) => `${index + 1}. ${item.name} - Rs. ${item.price}`);
+  const topResultsHint =
+    options.length >= 10
+      ? romanUrdu
+        ? "Top matches dikhaye gaye hain. Zyada exact result ke liye poora item name bhej dein."
+        : "Showing top matches. Send a more specific item name for broader accuracy."
+      : null;
   return [
     romanUrdu ? `*${query}* ke related items ye hain:` : `Here are matching items for *${query}*:`,
     ...lines,
+    ...(topResultsHint ? [topResultsHint] : []),
     romanUrdu
       ? "Order ke liye number select karein ya item name + quantity bhej dein."
       : "Reply with a number, or send item name with quantity to order.",

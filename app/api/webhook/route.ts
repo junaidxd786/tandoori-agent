@@ -848,8 +848,8 @@ async function drainConversationQueue(conversation: ConversationRow) {
         session,
       ] = await Promise.all([
         needsFullProcessing ? Promise.resolve(cachedMenuItems ?? []) : Promise.resolve([]),
-        messageType === "complex" && shouldRunSemanticLookup(nextMessage.content)
-          ? getSemanticMenuMatches(conversation.branch_id, nextMessage.content, 5)
+        needsFullProcessing && shouldRunSemanticLookup(nextMessage.content)
+          ? getSemanticMenuMatches(conversation.branch_id, nextMessage.content, 20)
           : Promise.resolve([]),
         shouldHydrateSession
           ? getOrCreateUserSession(conversation.id, {
