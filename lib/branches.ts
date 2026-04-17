@@ -102,6 +102,12 @@ export function findBranchSelection(input: string, branches: BranchSummary[]): B
   const byId = branches.find((branch) => branch.id.toLowerCase() === raw.toLowerCase());
   if (byId) return byId;
 
+  // Guard against UUID-like payloads from other interactive lists (e.g., menu item IDs).
+  // If a UUID does not match a branch ID exactly, do not attempt number/fuzzy parsing.
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw)) {
+    return null;
+  }
+
   // Handle interactive list selection
   const optionMatch = raw.match(/^branch[_\s-]?option[_\s-]?(\d+)$/i);
   if (optionMatch) {
@@ -111,7 +117,7 @@ export function findBranchSelection(input: string, branches: BranchSummary[]): B
     }
   }
 
-  const numberMatch = normalized.match(/\b(\d{1,2})\b/);
+  const numberMatch = normalized.match(/^(?:branch|option|number)?\s*(\d{1,2})$/);
   if (numberMatch) {
     const index = Number.parseInt(numberMatch[1], 10) - 1;
     if (index >= 0 && index < branches.length) {
