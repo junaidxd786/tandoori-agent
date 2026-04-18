@@ -3578,7 +3578,13 @@ function resolveRequestedItems(
   const ambiguous: Array<{ query: string; options: MenuCatalogItem[] }> = [];
   const customization = parseItemCustomizationFromText(rawText);
 
-  const requests = requested.length > 0 ? requested : findInlineItems(rawText, menuItems);
+  const shouldSkipInlineAddExtraction = isLikelyRemovalOrEditMessage(rawText);
+  const requests =
+    requested.length > 0
+      ? requested
+      : shouldSkipInlineAddExtraction
+        ? []
+        : findInlineItems(rawText, menuItems);
 
   for (const request of requests) {
     if (requested.length > 0 && !isGroundedItemRequest(rawText, request.name, semanticMatches)) {
@@ -3675,6 +3681,16 @@ function resolveRequestedItems(
     unknown: [...new Set(unknown)].slice(0, 5),
     ambiguous,
   };
+}
+
+function isLikelyRemovalOrEditMessage(rawText: string): boolean {
+  const normalized = normalizeText(rawText);
+  if (!normalized) return false;
+
+  return (
+    /(remove|delete|without|minus|cancel|kam kar|kam kr|nikaal|nikal)/.test(normalized) ||
+    /(qty|quantity|set|update|change|replace|instead)/.test(normalized)
+  );
 }
 
 function findDisambiguationCandidatesFromRaw(
