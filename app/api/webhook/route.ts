@@ -999,6 +999,7 @@ async function drainConversationQueue(conversation: ConversationRow) {
                 },
                 menuItems,
                 cart: nextStateSnapshot.cart,
+                customerInstructions: nextStateSnapshot.customer_instructions,
                 orderType: nextStateSnapshot.order_type,
                 address: nextStateSnapshot.address,
                 guests: nextStateSnapshot.guests,
@@ -1418,6 +1419,9 @@ async function createOrderFromPayload(
       qty: item.qty,
       price: Number(match.price),
       category: match.category ?? null,
+      size: item.size ?? null,
+      addons: Array.isArray(item.addons) ? item.addons.slice(0, 8) : [],
+      item_instructions: item.item_instructions ?? null,
     };
   });
 
@@ -1436,6 +1440,7 @@ async function createOrderFromPayload(
       type: payload.type,
       subtotal,
       delivery_fee: deliveryFee,
+      customer_instructions: payload.customer_instructions ?? null,
       address: payload.type === "delivery" ? payload.address : null,
       guests: payload.type === "dine-in" ? payload.guests : null,
       reservation_time: payload.type === "dine-in" ? payload.reservation_time : null,
@@ -1454,6 +1459,9 @@ async function createOrderFromPayload(
       name: item.name,
       qty: item.qty,
       price: item.price,
+      size: item.size,
+      addons: item.addons,
+      item_instructions: item.item_instructions,
     })),
   );
 
@@ -1558,6 +1566,7 @@ function buildFlowMessageForAgentReply(input: {
   branches?: BranchSummary[];
   menuItems?: MenuCatalogItem[];
   cart?: ConversationState["cart"];
+  customerInstructions?: ConversationState["customer_instructions"];
   orderType?: ConversationState["order_type"];
   address?: ConversationState["address"];
   guests?: ConversationState["guests"];
@@ -1579,6 +1588,7 @@ function buildFlowMessageForAgentReply(input: {
     branches: input.branches,
     menuItems: input.menuItems,
     cart: input.cart,
+    customerInstructions: input.customerInstructions,
     orderType: input.orderType,
     address: input.address,
     guests: input.guests,

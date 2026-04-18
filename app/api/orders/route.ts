@@ -23,6 +23,9 @@ export async function GET(req: NextRequest) {
       status,
       subtotal,
       delivery_fee,
+      customer_instructions,
+      cancellation_requested_at,
+      cancelled_at,
       address,
       guests,
       reservation_time,
@@ -32,7 +35,7 @@ export async function GET(req: NextRequest) {
       status_notification_error,
       created_at,
       branches (id, name, slug),
-      order_items (id, name, qty, price),
+      order_items (id, name, qty, price, size, addons, item_instructions),
       conversations (phone, name)
     `)
     .order("created_at", { ascending: false });

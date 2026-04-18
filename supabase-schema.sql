@@ -126,6 +126,7 @@ create table if not exists conversation_states (
   address text,
   guests integer check (guests is null or guests > 0),
   reservation_time timestamptz,
+  customer_instructions text,
   upsell_item_name text,
   upsell_item_price numeric,
   upsell_offered boolean not null default false,
@@ -173,9 +174,12 @@ create table if not exists orders (
   subtotal numeric not null check (subtotal >= 0),
   delivery_fee numeric not null default 0 check (delivery_fee >= 0),
   total numeric generated always as (subtotal + delivery_fee) stored,
+  customer_instructions text,
   address text,
   guests integer,
   reservation_time timestamptz,
+  cancellation_requested_at timestamptz,
+  cancelled_at timestamptz,
   assigned_to text,
   status_notified_at timestamptz,
   status_notification_status text check (status_notification_status in ('sent', 'failed', 'skipped')),
@@ -195,6 +199,9 @@ create table if not exists order_items (
   name text not null,
   qty integer not null check (qty > 0),
   price numeric not null check (price >= 0),
+  size text,
+  addons jsonb not null default '[]'::jsonb check (jsonb_typeof(addons) = 'array'),
+  item_instructions text,
   created_at timestamptz not null default now()
 );
 

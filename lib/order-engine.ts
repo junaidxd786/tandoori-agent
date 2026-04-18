@@ -49,7 +49,7 @@ export function detectMessageType(normalizedText: string): MessageType {
 export async function getRecentOrderContext(conversationId: string): Promise<RecentOrderContext | null> {
   const { data, error } = await supabaseAdmin
     .from("orders")
-    .select("order_number, status, type, created_at")
+    .select("id, order_number, status, type, created_at, cancelled_at")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: false })
     .limit(1)
@@ -59,10 +59,12 @@ export async function getRecentOrderContext(conversationId: string): Promise<Rec
   if (!data) return null;
 
   return {
+    id: data.id,
     order_number: data.order_number,
     status: data.status,
     type: data.type,
     created_at: data.created_at,
+    cancelled_at: data.cancelled_at ?? null,
   };
 }
 
@@ -113,6 +115,9 @@ export interface DraftCartItem {
   price: number;
   qty: number;
   category: string | null;
+  size: string | null;
+  addons: string[];
+  item_instructions: string | null;
 }
 
 interface CartRemovalRequest {
@@ -139,6 +144,7 @@ export interface ConversationState {
   address: string | null;
   guests: number | null;
   reservation_time: string | null;
+  customer_instructions: string | null;
   upsell_item_name: string | null;
   upsell_item_price: number | null;
   upsell_offered: boolean;
@@ -154,10 +160,12 @@ export interface ConversationState {
 }
 
 export interface RecentOrderContext {
+  id: string;
   order_number: number;
   status: string;
   type: OrderType;
   created_at: string;
+  cancelled_at: string | null;
 }
 
 export interface PlaceableOrderPayload {
@@ -168,6 +176,7 @@ export interface PlaceableOrderPayload {
   address: string | null;
   guests: number | null;
   reservation_time: string | null;
+  customer_instructions: string | null;
 }
 
 export interface TurnContext {
@@ -340,6 +349,17 @@ const MENU_LOOKUP_FILLER_WORDS = new Set([
   "we",
 ]);
 
+const ORDER_CANCELLATION_WINDOW_MS = 10 * 60 * 1000;
+const SIZE_WORDS = new Map<string, string>([
+  ["small", "Small"],
+  ["sm", "Small"],
+  ["medium", "Medium"],
+  ["med", "Medium"],
+  ["md", "Medium"],
+  ["large", "Large"],
+  ["lg", "Large"],
+]);
+
 const PRESENTED_OPTIONS_TTL_MS = 20 * 60 * 1000;
 
 function isShortAcknowledgment(normalizedText: string): boolean {
@@ -413,6 +433,7 @@ export function getDefaultConversationState(conversationId: string): Conversatio
     address: null,
     guests: null,
     reservation_time: null,
+    customer_instructions: null,
     upsell_item_name: null,
     upsell_item_price: null,
     upsell_offered: false,
@@ -440,6 +461,7 @@ export function parseConversationState(raw: Partial<ConversationState> & { conve
       ? raw.last_presented_options.filter(isMenuCatalogItemLike)
       : null,
     last_presented_options_at: typeof raw.last_presented_options_at === "string" ? raw.last_presented_options_at : null,
+    customer_instructions: typeof raw.customer_instructions === "string" ? raw.customer_instructions : null,
   };
 }
 
@@ -724,6 +746,49 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
       statePatch: withPreferredLanguage({}, preferredLanguage),
       trace,
     };
+  }
+
+  if (interpretation.intent === "cancel_order" && state.workflow_step === "idle" && state.cart.length === 0) {
+    const cancellation = await tryCancelRecentOrder(state.conversation_id);
+    if (cancellation.result === "cancelled") {
+      return replyDecision(
+        prefersRomanUrdu
+          ? `Theek hai, order #${cancellation.orderNumber ?? ""} cancel kar diya gaya hai.`
+          : `Done, your order #${cancellation.orderNumber ?? ""} has been cancelled.`,
+        withPreferredLanguage({}, preferredLanguage),
+        trace,
+      );
+    }
+
+    if (cancellation.result === "too_late") {
+      return replyDecision(
+        prefersRomanUrdu
+          ? "Cancellation ka 10-minute window complete ho chuka hai. Support se rabta karein."
+          : "The 10-minute cancellation window has passed. Please contact support for help.",
+        withPreferredLanguage({}, preferredLanguage),
+        trace,
+      );
+    }
+
+    if (cancellation.result === "already_final") {
+      return replyDecision(
+        prefersRomanUrdu
+          ? "Yeh order already final state mein hai, is liye cancel nahi ho sakta."
+          : "This order is already in a final state and can no longer be cancelled.",
+        withPreferredLanguage({}, preferredLanguage),
+        trace,
+      );
+    }
+
+    if (cancellation.result === "not_found") {
+      return replyDecision(
+        prefersRomanUrdu
+          ? "Aap ka koi recent order nahi mila jise cancel kiya ja sake."
+          : "I could not find a recent order to cancel.",
+        withPreferredLanguage({}, preferredLanguage),
+        trace,
+      );
+    }
   }
 
   if (state.workflow_step !== "idle" && interpretation.intent === "cancel_order") {
@@ -1235,6 +1300,9 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
         qty: 1,
         price: directSelection.price,
         category: directSelection.category,
+        size: null,
+        addons: [],
+        item_instructions: null,
       });
     }
 
@@ -1246,6 +1314,9 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
         qty: selection.qty,
         price: selected.price,
         category: selected.category,
+        size: null,
+        addons: [],
+        item_instructions: null,
       });
     }
   }
@@ -1318,6 +1389,21 @@ function handleAwaitingConfirmation(params: {
   const state = context.state;
   const normalizedText = normalizeText(context.messageText);
   const prefersRomanUrdu = preferredLanguage === "roman_urdu";
+  const instructionCandidate = extractOrderInstructionCandidate(context.messageText);
+
+  if (instructionCandidate) {
+    return buildSummaryReply(
+      {
+        state: {
+          ...state,
+          preferred_language: preferredLanguage,
+          customer_instructions: instructionCandidate,
+        },
+        settings: context.settings,
+      },
+      trace,
+    );
+  }
 
   if (interpretation.wants_confirmation === true || isExplicitYes(normalizedText)) {
     const validation = validateDraftForPlacement(state, context.settings);
@@ -1455,6 +1541,7 @@ function handleLogisticsAndFallback(params: {
   const state = context.state;
   const prefersRomanUrdu = preferredLanguage === "roman_urdu";
   const normalizedText = normalizeText(context.messageText);
+  const instructionCandidate = extractOrderInstructionCandidate(context.messageText);
 
   if (
     (state.workflow_step === "awaiting_order_type" ||
@@ -1494,6 +1581,9 @@ function handleLogisticsAndFallback(params: {
         qty: 1,
         price: state.upsell_item_price,
         category: sourceItem?.category ?? null,
+        size: null,
+        addons: [],
+        item_instructions: null,
       };
       const nextCart = mergeCartItems(state.cart, [upsellItem]);
 
@@ -1744,6 +1834,27 @@ function handleLogisticsAndFallback(params: {
   }
 
   if (state.cart.length > 0) {
+    if (instructionCandidate) {
+      return replyDecision(
+        prefersRomanUrdu
+          ? `Theek hai, order instructions update kar di: ${instructionCandidate}`
+          : `Sure, I updated your order instructions: ${instructionCandidate}`,
+        withPreferredLanguage(
+          {
+            ...buildPersistedStatePatch({
+              ...state,
+              customer_instructions: instructionCandidate,
+              preferred_language: preferredLanguage,
+            }),
+            workflow_step: "awaiting_order_type",
+          },
+          preferredLanguage,
+        ),
+        trace,
+        buildOrderTypeInteractiveList(prefersRomanUrdu, context.settings.delivery_enabled),
+      );
+    }
+
     if (interpretation.order_type) {
       return handleOrderTypeSelection(context, state, preferredLanguage, interpretation.order_type, trace);
     }
@@ -1809,7 +1920,10 @@ function isDraftCartItemLike(value: unknown): value is DraftCartItem {
     typeof cast.name === "string" &&
     typeof cast.price === "number" &&
     typeof cast.qty === "number" &&
-    (typeof cast.category === "string" || cast.category === null)
+    (typeof cast.category === "string" || cast.category === null) &&
+    (typeof cast.size === "string" || cast.size === null || cast.size === undefined) &&
+    (cast.addons === undefined || Array.isArray(cast.addons)) &&
+    (typeof cast.item_instructions === "string" || cast.item_instructions === null || cast.item_instructions === undefined)
   );
 }
 
@@ -1892,6 +2006,129 @@ function parseOrderTypeShortcut(normalizedText: string): OrderType | null {
   return null;
 }
 
+function extractOrderInstructionCandidate(rawText: string): string | null {
+  const trimmed = rawText.trim();
+  if (!trimmed) return null;
+
+  const explicit = trimmed.match(/(?:special\s+instructions?|instructions?|order\s+note|note)\s*[:\-]?\s*(.+)$/i);
+  if (explicit?.[1]) {
+    const value = explicit[1].trim();
+    return value.length >= 3 ? value.slice(0, 240) : null;
+  }
+
+  const polite = trimmed.match(/(?:please|pls)\s+(.+)/i);
+  if (polite?.[1] && /(spicy|mild|crispy|well done|without|no\s+\w+|extra)/i.test(polite[1])) {
+    return polite[1].trim().slice(0, 240);
+  }
+
+  return null;
+}
+
+function parseItemCustomizationFromText(rawText: string): {
+  size: string | null;
+  addons: string[];
+  itemInstructions: string | null;
+} {
+  const normalized = normalizeText(rawText);
+  let size: string | null = null;
+  for (const [key, value] of SIZE_WORDS) {
+    if (new RegExp(`\\b${key}\\b`, "i").test(normalized)) {
+      size = value;
+      break;
+    }
+  }
+
+  const addons: string[] = [];
+  const withMatch = normalized.match(/\bwith\s+([a-z0-9\s,]+)$/i);
+  if (withMatch?.[1]) {
+    const parts = withMatch[1]
+      .split(/,| and /i)
+      .map((part) => part.trim())
+      .filter((part) =>
+        part.length >= 2 &&
+        !MENU_LOOKUP_FILLER_WORDS.has(part) &&
+        !SIZE_WORDS.has(part) &&
+        !/\b(qty|quantity|piece|pcs|plate|order|item|items)\b/i.test(part),
+      );
+    addons.push(...parts.slice(0, 6));
+  }
+
+  const instructionSegments: string[] = [];
+  const withoutMatch = normalized.match(/\bwithout\s+([a-z0-9\s,]+)/i);
+  if (withoutMatch?.[1]) {
+    instructionSegments.push(`Without ${withoutMatch[1].trim()}`);
+  }
+  if (/\bextra\s+spicy\b/i.test(normalized)) instructionSegments.push("Extra spicy");
+  if (/\bless\s+spicy\b/i.test(normalized)) instructionSegments.push("Less spicy");
+  if (/\bmild\b/i.test(normalized)) instructionSegments.push("Mild");
+
+  const itemInstructions = instructionSegments.length > 0 ? instructionSegments.join("; ").slice(0, 240) : null;
+
+  return {
+    size,
+    addons: [...new Set(addons.map((entry) => entry.slice(0, 40)))],
+    itemInstructions,
+  };
+}
+
+function formatDraftItemLabel(item: DraftCartItem): string {
+  const details: string[] = [];
+  if (item.size) details.push(item.size);
+  const addons = Array.isArray(item.addons) ? item.addons : [];
+  if (addons.length > 0) details.push(`Add-ons: ${addons.join(", ")}`);
+  if (item.item_instructions) details.push(item.item_instructions);
+  if (details.length === 0) return item.name;
+  return `${item.name} (${details.join(" | ")})`;
+}
+
+function isSameDraftItem(left: DraftCartItem, right: DraftCartItem): boolean {
+  if (normalizeText(left.name) !== normalizeText(right.name)) return false;
+  if ((left.size ?? null) !== (right.size ?? null)) return false;
+  if ((left.item_instructions ?? null) !== (right.item_instructions ?? null)) return false;
+  const leftAddons = [...(Array.isArray(left.addons) ? left.addons : [])].map((entry) => normalizeText(entry)).sort();
+  const rightAddons = [...(Array.isArray(right.addons) ? right.addons : [])].map((entry) => normalizeText(entry)).sort();
+  if (leftAddons.length !== rightAddons.length) return false;
+  return leftAddons.every((entry, index) => entry === rightAddons[index]);
+}
+
+function isWithinCancellationWindow(createdAt: string): boolean {
+  const createdTime = new Date(createdAt).getTime();
+  if (!Number.isFinite(createdTime)) return false;
+  return Date.now() - createdTime <= ORDER_CANCELLATION_WINDOW_MS;
+}
+
+function canCancelOrderStatus(status: string): boolean {
+  return status === "received" || status === "preparing" || status === "out_for_delivery";
+}
+
+async function tryCancelRecentOrder(conversationId: string): Promise<{
+  result: "cancelled" | "too_late" | "not_found" | "already_final";
+  orderNumber?: number;
+}> {
+  const recentOrder = await getRecentOrderContext(conversationId);
+  if (!recentOrder) return { result: "not_found" };
+  if (!canCancelOrderStatus(recentOrder.status)) return { result: "already_final", orderNumber: recentOrder.order_number };
+  if (!isWithinCancellationWindow(recentOrder.created_at)) return { result: "too_late", orderNumber: recentOrder.order_number };
+
+  const { data, error } = await supabaseAdmin
+    .from("orders")
+    .update({
+      status: "cancelled",
+      cancellation_requested_at: new Date().toISOString(),
+      cancelled_at: new Date().toISOString(),
+    })
+    .eq("id", recentOrder.id)
+    .eq("status", recentOrder.status)
+    .select("id")
+    .maybeSingle();
+
+  if (error || !data) {
+    return { result: "already_final", orderNumber: recentOrder.order_number };
+  }
+
+  return { result: "cancelled", orderNumber: recentOrder.order_number };
+}
+
 function buildMenuQueryHints(rawText: string, normalizedText: string): string[] {
   if (isGenericMenuPrompt(normalizedText)) {
     return [];
@@ -1949,6 +2186,7 @@ function applyCheckoutSignalsToState(params: {
   const next = { ...params.state };
   const normalizedText = normalizeText(rawText);
   const explicitType = interpretation.order_type ?? parseOrderTypeShortcut(normalizedText);
+  const instructionCandidate = extractOrderInstructionCandidate(rawText);
 
   if (explicitType === "delivery" && settings.delivery_enabled) {
     next.order_type = "delivery";
@@ -1983,6 +2221,10 @@ function applyCheckoutSignalsToState(params: {
       }) ?? next.reservation_time;
     next.guests = guests ?? null;
     next.reservation_time = reservationTime ?? null;
+  }
+
+  if (instructionCandidate) {
+    next.customer_instructions = instructionCandidate;
   }
 
   return next;
@@ -2293,6 +2535,7 @@ function resetDraftState(): Partial<ConversationState> {
     address: null,
     guests: null,
     reservation_time: null,
+    customer_instructions: null,
     resume_workflow_step: null,
     summary_sent_at: null,
     upsell_item_name: null,
@@ -2549,12 +2792,12 @@ function buildOrderTypePrompt(deliveryEnabled: boolean, romanUrdu: boolean): str
 }
 
 function formatCartItems(cart: DraftCartItem[]): string {
-  return cart.map((item) => `${item.name} x${item.qty}`).join(", ");
+  return cart.map((item) => `${formatDraftItemLabel(item)} x${item.qty}`).join(", ");
 }
 
 function buildAddedItemsMessage(items: DraftCartItem[]): string {
   if (items.length === 0) return "";
-  const summary = items.map((item) => `${item.name} x${item.qty}`).join(", ");
+  const summary = items.map((item) => `${formatDraftItemLabel(item)} x${item.qty}`).join(", ");
   return `Added: ${summary}`;
 }
 
@@ -3063,6 +3306,7 @@ function buildPersistedStatePatch(state: ConversationState): Partial<Conversatio
     address: state.address,
     guests: state.guests,
     reservation_time: state.reservation_time,
+    customer_instructions: state.customer_instructions,
     upsell_item_name: state.upsell_item_name,
     upsell_item_price: state.upsell_item_price,
     upsell_offered: state.upsell_offered,
@@ -3115,7 +3359,7 @@ function buildSummaryReply(
 
   const lines: string[] = [
     "Order summary:",
-    ...state.cart.map((item) => `- ${item.name} x${item.qty} = Rs. ${item.price * item.qty}`),
+    ...state.cart.map((item) => `- ${formatDraftItemLabel(item)} x${item.qty} = Rs. ${item.price * item.qty}`),
     `Subtotal: Rs. ${subtotal}`,
   ];
 
@@ -3130,6 +3374,10 @@ function buildSummaryReply(
   } else if (state.order_type === "dine-in") {
     lines.push(`Guests: ${state.guests ?? "-"}`);
     lines.push(`Time: ${formatReservationTime(state.reservation_time)}`);
+  }
+
+  if (state.customer_instructions) {
+    lines.push(`Instructions: ${state.customer_instructions}`);
   }
 
   lines.push(
@@ -3248,6 +3496,7 @@ function validateDraftForPlacement(
         address: state.address,
         guests: null,
         reservation_time: null,
+        customer_instructions: state.customer_instructions,
       },
     };
   }
@@ -3273,6 +3522,7 @@ function validateDraftForPlacement(
       address: null,
       guests: state.guests,
       reservation_time: state.reservation_time,
+      customer_instructions: state.customer_instructions,
     },
   };
 }
@@ -3287,6 +3537,7 @@ function resolveRequestedItems(
   const matched: DraftCartItem[] = [];
   const unknown: string[] = [...modelUnknown];
   const ambiguous: Array<{ query: string; options: MenuCatalogItem[] }> = [];
+  const customization = parseItemCustomizationFromText(rawText);
 
   const requests = requested.length > 0 ? requested : findInlineItems(rawText, menuItems);
 
@@ -3316,6 +3567,9 @@ function resolveRequestedItems(
         price: exact.price,
         qty: clampQty(request.qty),
         category: exact.category,
+        size: customization.size,
+        addons: customization.addons,
+        item_instructions: customization.itemInstructions,
       });
       continue;
     }
@@ -3364,6 +3618,9 @@ function resolveRequestedItems(
         price: best.item.price,
         qty: clampQty(request.qty),
         category: best.item.category,
+        size: customization.size,
+        addons: customization.addons,
+        item_instructions: customization.itemInstructions,
       });
       continue;
     }
@@ -3775,7 +4032,7 @@ function applyCartQtyUpdates(
 function mergeCartItems(current: DraftCartItem[], additions: DraftCartItem[]): DraftCartItem[] {
   const merged = current.map((item) => ({ ...item }));
   for (const addition of additions) {
-    const existing = merged.find((item) => normalizeText(item.name) === normalizeText(addition.name));
+    const existing = merged.find((item) => isSameDraftItem(item, addition));
     if (existing) {
       existing.qty += addition.qty;
     } else {

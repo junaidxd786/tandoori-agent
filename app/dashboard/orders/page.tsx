@@ -15,6 +15,9 @@ interface OrderItem {
   name: string;
   qty: number;
   price: number;
+  size: string | null;
+  addons: unknown;
+  item_instructions: string | null;
 }
 
 interface Order {
@@ -25,6 +28,9 @@ interface Order {
   status: OrderStatus;
   subtotal: number;
   delivery_fee: number;
+  customer_instructions: string | null;
+  cancellation_requested_at: string | null;
+  cancelled_at: string | null;
   address: string | null;
   guests: number | null;
   reservation_time: string | null;
@@ -57,6 +63,31 @@ const STATUS_MAP: Record<OrderStatus, { label: string; color: string }> = {
 
 function getStatusOptions(current: OrderStatus) {
   return [current, ...STATUS_TRANSITIONS[current]];
+}
+
+function getAddonList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter(Boolean);
+}
+
+function formatOrderItemLabel(item: OrderItem) {
+  const details: string[] = [];
+  if (item.size) details.push(item.size);
+  const addons = getAddonList(item.addons);
+  if (addons.length > 0) details.push(`Add-ons: ${addons.join(", ")}`);
+  if (item.item_instructions) details.push(item.item_instructions);
+  if (details.length === 0) return item.name;
+  return `${item.name} (${details.join(" | ")})`;
+}
+
+function getCancellationMinutesRemaining(order: Order): number {
+  const createdAt = new Date(order.created_at).getTime();
+  if (!Number.isFinite(createdAt)) return 0;
+  const windowMs = 10 * 60 * 1000;
+  const remaining = Math.ceil((windowMs - (Date.now() - createdAt)) / 60000);
+  return Math.max(0, remaining);
 }
 
 export default function OrdersPage() {
@@ -256,6 +287,9 @@ export default function OrdersPage() {
                         <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{totalItems} items</p>
                         <p className="text-lg font-bold text-slate-900">Rs. {total.toLocaleString()}</p>
                         <p className="text-[11px] text-slate-500">SLA age: {formatDistanceToNow(new Date(order.created_at))}</p>
+                        {ACTIVE_STATUSES.includes(order.status) && (
+                          <p className="text-[11px] text-slate-500">Cancel window: {getCancellationMinutesRemaining(order)} min left</p>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2">
@@ -296,7 +330,7 @@ export default function OrdersPage() {
                           <div className="space-y-2">
                             {order.order_items.map((item) => (
                               <div key={item.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2">
-                                <span className="text-sm font-semibold text-slate-900">{item.name} x{item.qty}</span>
+                                <span className="text-sm font-semibold text-slate-900">{formatOrderItemLabel(item)} x{item.qty}</span>
                                 <span className="text-sm font-semibold text-slate-700">Rs. {(item.price * item.qty).toLocaleString()}</span>
                               </div>
                             ))}
@@ -328,6 +362,8 @@ export default function OrdersPage() {
                             {order.guests != null && <div className="flex justify-between gap-4"><span>Guests</span><span className="font-semibold text-slate-900">{order.guests}</span></div>}
                             {order.reservation_time && <div className="flex justify-between gap-4"><span>Reservation</span><span className="font-semibold text-slate-900">{format(new Date(order.reservation_time), "dd MMM, hh:mm a")}</span></div>}
                             {order.address && <div className="flex justify-between gap-4"><span>Address</span><span className="text-right font-semibold text-slate-900">{order.address}</span></div>}
+                            {order.customer_instructions && <div className="flex justify-between gap-4"><span>Instructions</span><span className="text-right font-semibold text-slate-900">{order.customer_instructions}</span></div>}
+                            {order.cancelled_at && <div className="flex justify-between gap-4"><span>Cancelled At</span><span className="font-semibold text-slate-900">{format(new Date(order.cancelled_at), "dd MMM yyyy, hh:mm a")}</span></div>}
                             <div className="flex justify-between gap-4"><span>Subtotal</span><span className="font-semibold text-slate-900">Rs. {Number(order.subtotal).toLocaleString()}</span></div>
                             <div className="flex justify-between gap-4"><span>Delivery Fee</span><span className="font-semibold text-slate-900">Rs. {Number(order.delivery_fee).toLocaleString()}</span></div>
                             <div className="flex justify-between gap-4 border-t border-slate-200 pt-2"><span className="font-semibold">Total</span><span className="font-bold text-slate-900">Rs. {(Number(order.subtotal) + Number(order.delivery_fee)).toLocaleString()}</span></div>

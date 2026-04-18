@@ -216,6 +216,7 @@ export interface Database {
           address: string | null;
           guests: number | null;
           reservation_time: string | null;
+          customer_instructions: string | null;
           upsell_item_name: string | null;
           upsell_item_price: number | null;
           upsell_offered: boolean;
@@ -246,6 +247,7 @@ export interface Database {
           address?: string | null;
           guests?: number | null;
           reservation_time?: string | null;
+          customer_instructions?: string | null;
           upsell_item_name?: string | null;
           upsell_item_price?: number | null;
           upsell_offered?: boolean;
@@ -312,9 +314,12 @@ export interface Database {
           subtotal: number;
           delivery_fee: number;
           total: number;
+          customer_instructions: string | null;
           address: string | null;
           guests: number | null;
           reservation_time: string | null;
+          cancellation_requested_at: string | null;
+          cancelled_at: string | null;
           assigned_to: string | null;
           status_notified_at: string | null;
           status_notification_status: "sent" | "failed" | "skipped" | null;
@@ -333,9 +338,12 @@ export interface Database {
           subtotal: number;
           delivery_fee?: number;
           total?: number;
+          customer_instructions?: string | null;
           address?: string | null;
           guests?: number | null;
           reservation_time?: string | null;
+          cancellation_requested_at?: string | null;
+          cancelled_at?: string | null;
           assigned_to?: string | null;
           status_notified_at?: string | null;
           status_notification_status?: "sent" | "failed" | "skipped" | null;
@@ -352,6 +360,9 @@ export interface Database {
           name: string;
           qty: number;
           price: number;
+          size: string | null;
+          addons: Json;
+          item_instructions: string | null;
           created_at: string;
         };
         Insert: {
@@ -360,6 +371,9 @@ export interface Database {
           name: string;
           qty: number;
           price: number;
+          size?: string | null;
+          addons?: Json;
+          item_instructions?: string | null;
           created_at?: string;
         };
         Update: Partial<Database["public"]["Tables"]["order_items"]["Insert"]>;

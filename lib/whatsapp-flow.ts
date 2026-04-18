@@ -27,6 +27,7 @@ type FlowPayloadInput = {
   branches?: BranchSummary[];
   menuItems?: MenuCatalogItem[];
   cart?: DraftCartItem[];
+  customerInstructions?: string | null;
   orderType?: OrderType | null;
   address?: string | null;
   guests?: number | null;
@@ -208,6 +209,9 @@ function buildFlowData(input: FlowPayloadInput): Record<string, unknown> {
     qty: item.qty,
     price: Number(item.price),
     category: item.category,
+    size: item.size ?? null,
+    addons: item.addons ?? [],
+    item_instructions: item.item_instructions ?? null,
   }));
   const cartSubtotal = cartItems.reduce((sum, item) => sum + item.qty * item.price, 0);
   const deliveryFee =
@@ -241,6 +245,7 @@ function buildFlowData(input: FlowPayloadInput): Record<string, unknown> {
     cart_subtotal: cartSubtotal,
     delivery_fee: deliveryFee,
     cart_total: total,
+    customer_instructions: input.customerInstructions ?? null,
     order_type: input.orderType ?? null,
     address: input.address ?? null,
     guests: input.guests ?? null,

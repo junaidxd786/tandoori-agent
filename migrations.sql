@@ -125,6 +125,7 @@ create table if not exists conversation_states (
   address text,
   guests integer,
   reservation_time timestamptz,
+  customer_instructions text,
   upsell_item_name text,
   upsell_item_price numeric,
   upsell_offered boolean not null default false,
@@ -170,6 +171,7 @@ alter table conversation_states add column if not exists last_presented_category
 alter table conversation_states add column if not exists last_presented_at timestamptz;
 alter table conversation_states add column if not exists last_presented_options jsonb;
 alter table conversation_states add column if not exists last_presented_options_at timestamptz;
+alter table conversation_states add column if not exists customer_instructions text;
 alter table conversation_states add column if not exists declined_upsells jsonb not null default '[]'::jsonb;
 alter table conversation_states drop constraint if exists conversation_states_preferred_language_check;
 alter table conversation_states add constraint conversation_states_preferred_language_check check (preferred_language in ('english', 'roman_urdu')) not valid;
@@ -188,7 +190,13 @@ alter table orders add column if not exists assigned_to text;
 alter table orders add column if not exists status_notified_at timestamptz;
 alter table orders add column if not exists status_notification_status text;
 alter table orders add column if not exists status_notification_error text;
+alter table orders add column if not exists customer_instructions text;
+alter table orders add column if not exists cancellation_requested_at timestamptz;
+alter table orders add column if not exists cancelled_at timestamptz;
 alter table order_items add column if not exists created_at timestamptz not null default now();
+alter table order_items add column if not exists size text;
+alter table order_items add column if not exists addons jsonb not null default '[]'::jsonb;
+alter table order_items add column if not exists item_instructions text;
 
 update orders set branch_id = conversations.branch_id
 from conversations
@@ -206,6 +214,8 @@ alter table orders add constraint orders_require_delivery_fields check (
   or
   (type = 'dine-in' and address is null and guests is not null and reservation_time is not null)
 ) not valid;
+alter table order_items drop constraint if exists order_items_addons_array_check;
+alter table order_items add constraint order_items_addons_array_check check (jsonb_typeof(addons) = 'array') not valid;
 
 update contacts set active_branch_id = branches.id
 from branches

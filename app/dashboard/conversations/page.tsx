@@ -89,6 +89,8 @@ interface MessageResponse {
 interface DraftLine {
   name: string;
   qty: number;
+  size?: string | null;
+  addons?: string[] | null;
   notes?: string | null;
 }
 
@@ -120,13 +122,24 @@ function getDraftLines(cart: unknown): DraftLine[] {
       const record = item as Record<string, unknown>;
       const name = String(record.name ?? record.title ?? record.item ?? "").trim();
       const qty = Number(record.qty ?? record.quantity ?? 1);
-      const notes = typeof record.notes === "string" ? record.notes : null;
+      const size = typeof record.size === "string" ? record.size : null;
+      const addons = Array.isArray(record.addons)
+        ? record.addons.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+        : [];
+      const notes =
+        typeof record.item_instructions === "string"
+          ? record.item_instructions
+          : typeof record.notes === "string"
+            ? record.notes
+            : null;
       
       if (!name) return null;
       
       return { 
         name, 
         qty: Number.isFinite(qty) && qty > 0 ? qty : 1, 
+        size,
+        addons,
         notes 
       };
     })
@@ -788,6 +801,10 @@ export default function ConversationsPage() {
                     <li key={i} className="flex items-start justify-between rounded-xl border border-slate-100 bg-slate-50 p-4">
                       <div>
                         <p className="font-semibold text-slate-900">{line.name}</p>
+                        {line.size && <p className="mt-1 text-xs text-slate-500">Size: {line.size}</p>}
+                        {line.addons && line.addons.length > 0 && (
+                          <p className="mt-1 text-xs text-slate-500">Add-ons: {line.addons.join(", ")}</p>
+                        )}
                         {line.notes && <p className="mt-1 text-xs text-slate-500">{line.notes}</p>}
                       </div>
                       <span className="flex h-6 min-w-[24px] items-center justify-center rounded bg-white px-2 text-xs font-bold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-200">

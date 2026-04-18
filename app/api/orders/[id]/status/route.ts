@@ -11,14 +11,18 @@ const VALID_STATUSES = [
   "delivered",
   "cancelled",
 ] as const;
+const CANCELLATION_WINDOW_MS = 10 * 60 * 1000;
 
 type OrderStatus = (typeof VALID_STATUSES)[number];
 type StatusPatchBody = { status?: OrderStatus; assigned_to?: string | null };
 type OrderWithConversation = {
   status: OrderStatus;
   type: "delivery" | "dine-in";
+  created_at: string;
   conversation_id: string;
   assigned_to?: string | null;
+  cancellation_requested_at?: string | null;
+  cancelled_at?: string | null;
   conversations?: { phone?: string | null; name?: string | null } | null;
 };
 
@@ -72,7 +76,7 @@ export async function PATCH(
 
   const { data: existingOrder, error: existingError } = await supabaseAdmin
     .from("orders")
-    .select(`status, type, conversation_id, assigned_to, conversations (phone, name)`)
+    .select(`status, type, created_at, conversation_id, assigned_to, cancellation_requested_at, cancelled_at, conversations (phone, name)`)
     .eq("id", accessibleOrder.id)
     .single();
 
@@ -88,11 +92,26 @@ export async function PATCH(
     );
   }
 
+  if (status === "cancelled" && typedExistingOrder.status !== "cancelled") {
+    const createdAtMs = new Date(typedExistingOrder.created_at).getTime();
+    const withinWindow = Number.isFinite(createdAtMs) && Date.now() - createdAtMs <= CANCELLATION_WINDOW_MS;
+    if (!withinWindow) {
+      return NextResponse.json(
+        { error: "Order cancellation window has expired (10 minutes)." },
+        { status: 400 },
+      );
+    }
+  }
+
   const updates: Record<string, unknown> = {
     updated_at: new Date().toISOString(),
   };
   if (status !== undefined) updates.status = status;
   if (body.assigned_to !== undefined) updates.assigned_to = assignedTo;
+  if (status === "cancelled" && typedExistingOrder.status !== "cancelled") {
+    updates.cancellation_requested_at = new Date().toISOString();
+    updates.cancelled_at = new Date().toISOString();
+  }
 
   const { data: order, error } = await supabaseAdmin
     .from("orders")
