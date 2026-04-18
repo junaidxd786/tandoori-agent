@@ -145,6 +145,7 @@ type CityBranchGroup = {
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
+const ORDER_FRESH_START_AFTER_INACTIVITY_MS = 2 * 60 * 60 * 1000;
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -427,9 +428,18 @@ async function processWebhook(body: unknown) {
 
     // Normal processing if branch is already active
     const conversation = await upsertConversation(contact, contact.active_branch_id, contactName);
-    const state = await getOrCreateConversationState(conversation.id);
+    let state = await getOrCreateConversationState(conversation.id);
     if (state.last_processed_user_message_id === message.id) {
       continue;
+    }
+
+    const createdAt = toIsoTimestamp(message.timestamp);
+    if (shouldStartFreshOrderAfterInactivity(state, createdAt)) {
+      const nextLanguage = incomingContent
+        ? inferLanguagePreference(incomingContent, state.preferred_language)
+        : state.preferred_language;
+      await resetOrderDraftAfterInactivity(conversation.id, conversation.mode, nextLanguage);
+      state = await getOrCreateConversationState(conversation.id);
     }
 
     if (!incomingContent) {
@@ -445,20 +455,19 @@ async function processWebhook(body: unknown) {
           workflowStep: state.workflow_step,
           body: nonTextReply,
         });
-        await sendAndPersistAssistantMessage(
-          conversation.id,
-          message.from,
-          nonTextReply,
-          null,
-          nonTextFlow,
-        );
+      await sendAndPersistAssistantMessage(
+        conversation.id,
+        message.from,
+        nonTextReply,
+        null,
+        nonTextFlow,
+      );
       }
-      await markMessageProcessed(state, message.id, toIsoTimestamp(message.timestamp), null);
+      await markMessageProcessed(state, message.id, createdAt, null);
       continue;
     }
 
     const content = incomingContent;
-    const createdAt = toIsoTimestamp(message.timestamp);
     const persistedMessage = await persistUserMessage(conversation.id, content, message.id, createdAt);
 
     if (isBranchChangeRequest(content)) {
@@ -1905,6 +1914,67 @@ function buildInteractiveFallbackText(payload: {
     .join("\n");
 
   return [payload.body, options].filter(Boolean).join("\n");
+}
+
+function shouldStartFreshOrderAfterInactivity(state: ConversationState, incomingCreatedAt: string): boolean {
+  if (!state.last_processed_user_message_at) return false;
+
+  const lastProcessedAtMs = new Date(state.last_processed_user_message_at).getTime();
+  const incomingAtMs = new Date(incomingCreatedAt).getTime();
+  if (!Number.isFinite(lastProcessedAtMs) || !Number.isFinite(incomingAtMs)) return false;
+
+  return incomingAtMs - lastProcessedAtMs >= ORDER_FRESH_START_AFTER_INACTIVITY_MS;
+}
+
+async function resetOrderDraftAfterInactivity(
+  conversationId: string,
+  mode: ConversationRow["mode"],
+  preferredLanguage: ConversationState["preferred_language"],
+) {
+  const resetState = {
+    ...getDefaultConversationState(conversationId),
+    preferred_language: preferredLanguage,
+  };
+
+  const { error: stateError } = await supabaseAdmin
+    .from("conversation_states")
+    .update({
+      ...resetState,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("conversation_id", conversationId);
+
+  if (stateError) {
+    throw stateError;
+  }
+
+  if (mode === "human") {
+    return;
+  }
+
+  await getOrCreateUserSession(conversationId, {
+    active_node: "cart_builder",
+    status: "active",
+    is_bot_active: true,
+  });
+
+  await updateUserSession(conversationId, {
+    active_node: "cart_builder",
+    return_node: null,
+    status: "active",
+    is_bot_active: true,
+    invalid_step_count: 0,
+    consecutive_tool_failures: 0,
+    anger_level: 0,
+    last_intent: null,
+    last_tool_name: null,
+    last_tool_error: null,
+    last_user_message: null,
+    last_assistant_reply: null,
+    last_semantic_candidates: [],
+    escalation_reason: null,
+    escalated_at: null,
+  });
 }
 
 function toIsoTimestamp(timestamp: string): string {
