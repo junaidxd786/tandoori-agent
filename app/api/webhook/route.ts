@@ -1483,7 +1483,7 @@ function buildInteractiveListForPresentedOptions(
   const rows = options.slice(0, 10).map((item) => ({
     id: item.id,
     title: item.name,
-    description: `Rs. ${item.price}${item.category ? ` • ${item.category}` : ""}`,
+    description: `Rs. ${item.price}${item.category ? ` - ${item.category}` : ""}`,
   }));
 
   return {
@@ -1989,3 +1989,4 @@ async function recordOrderAgentTurn(input: {
     console.error("[webhook] Failed to record order agent turn:", error);
   }
 }
+

@@ -1023,6 +1023,44 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     }
   }
 
+  // Interactive row IDs are UUIDs. If one arrives after the visible list
+  // context changed, guide the user back instead of falling into AI fallback.
+  if (isUuidLike(rawText.trim()) && (!state.last_presented_options || state.last_presented_options.length === 0)) {
+    if (state.last_presented_category === "__category_list__") {
+      const categoryReply = buildCategoryListReply(menuItems, prefersRomanUrdu, 1);
+      return replyDecision(
+        prefersRomanUrdu
+          ? `Woh purana option ab active nahi raha. Fresh category list se dubara select karein.\n\n${categoryReply.text}`
+          : `That older option is no longer active. Please choose again from the fresh category list.\n\n${categoryReply.text}`,
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_category: "__category_list__",
+            last_presented_options: null,
+            last_presented_options_at: null,
+          },
+          preferredLanguage,
+        ),
+        trace,
+        categoryReply.interactiveList,
+      );
+    }
+
+    return replyDecision(
+      prefersRomanUrdu
+        ? "Woh purana option expire ho chuka hai. *menu* likhein ya item ka naam dobara bhej dein."
+        : "That older option has expired. Send *menu* or share the item name again.",
+      withPreferredLanguage(
+        {
+          last_presented_options: null,
+          last_presented_options_at: null,
+        },
+        preferredLanguage,
+      ),
+      trace,
+    );
+  }
+
   const availabilityQuery = extractItemAvailabilityQuery(normalizedText);
   if (availabilityQuery) {
     const itemSuggestions = findLikelyMenuSuggestions(availabilityQuery, menuItems, 12); // Increased limit for availability queries
@@ -3671,7 +3709,7 @@ function isLikelyQuestionMessage(rawText: string): boolean {
   const normalized = normalizeText(rawText);
   if (!normalized) return false;
 
-  if (/[?؟]/.test(rawText)) return true;
+  if (/[?\u061F]/.test(rawText)) return true;
 
   if (
     /^(what|how|when|where|why|which|who|can|could|would|do|does|is|are|kya|kaise|kab|kahan|kitna|kitne)\b/.test(
@@ -3682,6 +3720,10 @@ function isLikelyQuestionMessage(rawText: string): boolean {
   }
 
   return /\b(price|timing|open|close|location|address|phone|contact|charges|fee|minimum)\b/.test(normalized);
+}
+
+function isUuidLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function isLikelySelectionCommand(normalizedText: string): boolean {
@@ -3702,6 +3744,17 @@ function parseSelectionWithQty(
 ): { optionIndex: number; qty: number } | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
+
+  // These are control payloads from interactive lists/flows, not item picks.
+  // Let dedicated handlers route them instead of turning them into option numbers.
+  if (
+    /^(?:category[_\s-]?(?:option|more)[_\s-]?\d{1,2}|city[_\s-]?option[_\s-]?\d{1,2}|branch[_\s-]?option[_\s-]?\d{1,2}|order[_\s-]?type[_\s-]?(?:delivery|dine[_\s-]?in))$/i.test(
+      trimmed,
+    )
+  ) {
+    return null;
+  }
+
   const normalized = normalizeText(trimmed);
 
   if (isLikelyQuestionMessage(trimmed) && !isLikelySelectionCommand(normalized)) {
@@ -4030,3 +4083,4 @@ function extractQuantityNearPhrase(text: string, phrase: string): number | null 
 
   return null;
 }
+

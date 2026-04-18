@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "check:category-routing": "node scripts/check-category-routing.mjs"
+    "check:category-routing": "node scripts/check-category-routing.mjs",
+    "check:interactive-guards": "node scripts/check-interactive-guards.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",
