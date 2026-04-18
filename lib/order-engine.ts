@@ -3557,20 +3557,31 @@ function resolveRemovalRequests(
   cart: DraftCartItem[],
   rawText: string,
 ): CartRemovalRequest[] {
-  const requests: CartRemovalRequest[] = [];
-  if (cart.length === 0) return requests;
+  const interpretedRequests: CartRemovalRequest[] = [];
+  if (cart.length === 0) return interpretedRequests;
 
   for (const removal of interpretation.remove_items) {
     const matched = findCartMatch(removal.name, cart);
     if (!matched) continue;
-    requests.push({
+    interpretedRequests.push({
       name: matched.name,
       qty: removal.qty === "all" ? "all" : clampQty(removal.qty),
     });
   }
 
-  requests.push(...extractDirectRemovalRequests(rawText, cart));
-  return mergeRemovalRequests(requests);
+  const directRequests = extractDirectRemovalRequests(rawText, cart);
+  if (directRequests.length === 0) {
+    return mergeRemovalRequests(interpretedRequests);
+  }
+
+  // User-typed direct removals should override AI-interpreted removals
+  // for the same item, especially for explicit quantities like "remove 2 kheer".
+  const directKeys = new Set(directRequests.map((request) => normalizeText(request.name)));
+  const filteredInterpreted = interpretedRequests.filter(
+    (request) => !directKeys.has(normalizeText(request.name)),
+  );
+
+  return mergeRemovalRequests([...filteredInterpreted, ...directRequests]);
 }
 
 function resolveQuantityUpdates(rawText: string, cart: DraftCartItem[]): CartQtyUpdate[] {
