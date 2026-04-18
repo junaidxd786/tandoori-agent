@@ -1243,11 +1243,13 @@ async function sendAndPersistAssistantMessage(
   flowMessage?: WhatsAppInteractiveFlowPayload | null,
 ) {
   if (flowMessage) {
+    const flowVisibleBody = flowMessage.body?.trim();
+    const flowPersistedContent = flowVisibleBody && flowVisibleBody.length > 0 ? flowVisibleBody : content;
     try {
       await sendAndPersistOutboundFlowMessage({
         conversationId,
         phone,
-        content,
+        content: flowPersistedContent,
         senderKind: "ai",
         flow: flowMessage,
       });
@@ -1260,11 +1262,14 @@ async function sendAndPersistAssistantMessage(
   }
 
   if (interactiveList && interactiveList.rows.length > 0) {
+    const interactiveVisibleBody = interactiveList.body?.trim();
+    const interactivePersistedContent =
+      interactiveVisibleBody && interactiveVisibleBody.length > 0 ? interactiveVisibleBody : content;
     try {
       await sendAndPersistOutboundInteractiveMessage({
         conversationId,
         phone,
-        content,
+        content: interactivePersistedContent,
         senderKind: "ai",
         interactive: interactiveList,
       });
