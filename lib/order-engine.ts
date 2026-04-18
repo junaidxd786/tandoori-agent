@@ -1,11 +1,25 @@
 import { getOrderTurnInterpretation, type OrderTurnInterpretation } from "./ai";
+import { handleAwaitingConfirmationFlow, handleLogisticsAndFallbackFlow } from "./order-flow-handlers";
+import { buildCategoryListReply, parseCategoryMorePage } from "./order-menu-categories";
+import {
+  buildAmbiguousItemReply,
+  buildCategoryItemsReply,
+  buildItemMatchesReply,
+  findCategoryRequest,
+} from "./order-menu-replies";
 import type { SemanticMenuMatch } from "./semantic-menu";
 import {
-  buildRestaurantDateTimeIso,
-  getRestaurantNowParts,
-  parseRestaurantClock,
-  type RestaurantSettings,
-} from "./settings";
+  extractAnyQuantity,
+  extractQuantityNearPhrase,
+  getGreetingReply,
+  isSimpleAcknowledgmentPattern,
+  isSimpleGreetingPattern,
+  parseAddress,
+  parseGuestCount,
+  parseReservationTime,
+} from "./order-input-parsers";
+import { itemSimilarityScore, normalizeCompact, normalizeText, tokenOverlapScore, tokenizeForMenuMatching } from "./order-text-utils";
+import { type RestaurantSettings } from "./settings";
 import { supabaseAdmin } from "./supabase-admin";
 import type { UserSession } from "./user-session";
 
@@ -261,59 +275,6 @@ const RESTART_WORDS = ["restart", "start over", "new order", "fresh order", "nay
 const CONTINUE_WORDS = ["continue", "resume", "same order", "carry on"];
 const CANCEL_WORDS = ["cancel order", "stop order", "rehne do", "forget it", "leave it"];
 
-const NUMBER_WORDS: Record<string, number> = {
-  a: 1,
-  an: 1,
-  one: 1,
-  two: 2,
-  three: 3,
-  four: 4,
-  five: 5,
-  six: 6,
-  seven: 7,
-  eight: 8,
-  nine: 9,
-  ten: 10,
-  ek: 1,
-  aik: 1,
-  do: 2,
-  teen: 3,
-  char: 4,
-  chaar: 4,
-  panj: 5,
-  paanch: 5,
-  cheh: 6,
-  chay: 6,
-  saat: 7,
-  aath: 8,
-  ath: 8,
-  das: 10,
-};
-
-const MENU_TOKEN_STOP_WORDS = new Set([
-  "the",
-  "a",
-  "an",
-  "please",
-  "pls",
-  "with",
-  "without",
-  "and",
-  "or",
-  "my",
-  "for",
-  "item",
-  "items",
-  "dish",
-  "food",
-  "menu",
-  "order",
-  "add",
-  "remove",
-  "qty",
-  "quantity",
-]);
-
 const MENU_LOOKUP_FILLER_WORDS = new Set([
   "show",
   "list",
@@ -380,25 +341,6 @@ function isShortAcknowledgment(normalizedText: string): boolean {
   if (trimmed.split(/\s+/).length > 3) return false;
   return /\b(ok|okay|k|thanks|thank\s*you|shukriya|theek|fine|good|alright|sure|haan|han|na|nahi)\b/i.test(trimmed);
 }
-
-const ADDRESS_HINTS = [
-  "street",
-  "st",
-  "road",
-  "rd",
-  "house",
-  "flat",
-  "apartment",
-  "block",
-  "sector",
-  "phase",
-  "lane",
-  "gali",
-  "mohalla",
-  "near",
-  "opposite",
-  "plot",
-];
 
 const ROMAN_URDU_SIGNAL_WORDS = [
   "aoa",
@@ -1273,7 +1215,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   if (state.workflow_step === "awaiting_confirmation") {
-    return handleAwaitingConfirmation({
+    return handleAwaitingConfirmationFlow({
       context,
       interpretation,
       matchedAdds,
@@ -1281,6 +1223,25 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
       qtyUpdates,
       preferredLanguage,
       trace,
+      helpers: {
+        extractOrderInstructionCandidate,
+        buildSummaryReply,
+        isExplicitYes,
+        validateDraftForPlacement,
+        replyDecision,
+        withPreferredLanguage,
+        buildOrderPlacedReply,
+        resetDraftState,
+        isExplicitNo,
+        mutateCart,
+        applyCartQtyUpdates,
+        applyCheckoutSignalsToState,
+        buildLogisticsOrSummaryReply,
+        buildRemovedItemsMessage,
+        buildQtyUpdatedItemsMessage,
+        buildUnknownItemReplyData,
+        shouldDeferToContextSwitchFallback,
+      },
     });
   }
 
@@ -1401,550 +1362,36 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     return handleOrderTypeSelection(context, state, preferredLanguage, interpretation.order_type, trace);
   }
 
-  return handleLogisticsAndFallback({
+  return handleLogisticsAndFallbackFlow({
     context,
     interpretation,
     matchedAdds,
     preferredLanguage,
     trace,
+    helpers: {
+      extractOrderInstructionCandidate,
+      replyDecision,
+      withPreferredLanguage,
+      shouldDeferToContextSwitchFallback,
+      buildUnknownItemReplyData,
+      isUpsellYes,
+      isUpsellNo,
+      mergeCartItems,
+      buildOrderTypePrompt,
+      buildOrderTypeInteractiveList,
+      buildUpsellInteractiveList,
+      handleOrderTypeSelection,
+      inferGeneralQtyOverride,
+      applyQtyOverride,
+      buildClosedReply,
+      inferLastItemQtyOverride,
+      applyLastItemQtyOverride,
+      parseOrderTypeShortcut,
+      buildSummaryReply,
+      buildPersistedStatePatch,
+      clampQty,
+    },
   });
-}
-
-function handleAwaitingConfirmation(params: {
-  context: TurnContext;
-  interpretation: OrderTurnInterpretation;
-  matchedAdds: MatchedItemsResult;
-  removeRequests: CartRemovalRequest[];
-  qtyUpdates: CartQtyUpdate[];
-  preferredLanguage: LanguagePreference;
-  trace: TurnTrace;
-}): TurnDecision {
-  const { context, interpretation, matchedAdds, removeRequests, qtyUpdates, preferredLanguage, trace } = params;
-  const state = context.state;
-  const normalizedText = normalizeText(context.messageText);
-  const prefersRomanUrdu = preferredLanguage === "roman_urdu";
-  const instructionCandidate = extractOrderInstructionCandidate(context.messageText);
-
-  if (instructionCandidate) {
-    return buildSummaryReply(
-      {
-        state: {
-          ...state,
-          preferred_language: preferredLanguage,
-          customer_instructions: instructionCandidate,
-        },
-        settings: context.settings,
-      },
-      trace,
-    );
-  }
-
-  if (interpretation.wants_confirmation === true || isExplicitYes(normalizedText)) {
-    const validation = validateDraftForPlacement(state, context.settings);
-    if (validation.ok === false) {
-      return replyDecision(
-        validation.reply(prefersRomanUrdu),
-        withPreferredLanguage(validation.statePatch, preferredLanguage),
-        trace,
-      );
-    }
-
-    return {
-      kind: "place_order",
-      reply: buildOrderPlacedReply(context.settings, prefersRomanUrdu),
-      statePatch: withPreferredLanguage(
-        {
-          ...resetDraftState(),
-          summary_sent_at: new Date().toISOString(),
-        },
-        preferredLanguage,
-      ),
-      order: validation.order,
-      trace,
-    };
-  }
-
-  if (
-    interpretation.wants_confirmation === false ||
-    interpretation.intent === "modify_order" ||
-    interpretation.intent === "add_items" ||
-    matchedAdds.matched.length > 0 ||
-    removeRequests.length > 0 ||
-    qtyUpdates.length > 0 ||
-    isExplicitNo(normalizedText)
-  ) {
-    const mutated = mutateCart(state.cart, matchedAdds.matched, removeRequests);
-    const cartWithQtyUpdates = applyCartQtyUpdates(mutated.cart, qtyUpdates);
-    if (cartWithQtyUpdates.length === 0) {
-      return replyDecision(
-        prefersRomanUrdu
-          ? "Theek hai, cart empty ho gayi. Naya item bhej dein."
-          : "Done, your cart is now empty. Send an item to start again.",
-        withPreferredLanguage(resetDraftState(), preferredLanguage),
-        trace,
-      );
-    }
-
-    const nextStateBase: ConversationState = {
-      ...state,
-      cart: cartWithQtyUpdates,
-      workflow_step: "collecting_items",
-      summary_sent_at: null,
-      preferred_language: preferredLanguage,
-    };
-    const nextState = applyCheckoutSignalsToState({
-      state: nextStateBase,
-      interpretation,
-      rawText: context.messageText,
-      settings: context.settings,
-    });
-
-    return buildLogisticsOrSummaryReply(
-      {
-        state: nextState,
-        settings: context.settings,
-        matchedAdds,
-        removedItemsText: [buildRemovedItemsMessage(mutated.removed), buildQtyUpdatedItemsMessage(qtyUpdates)]
-          .filter(Boolean)
-          .join("\n"),
-        menuItems: context.menuItems,
-      },
-      trace,
-    );
-  }
-
-  const askedForEditsWithoutResolvedItems =
-    interpretation.add_items.length > 0 ||
-    /(?:\badd\b|\baur\b|\bbhi\b|\bplus\b|kar do|kr do|remove|delete|minus|kam kr|kam kar)/.test(normalizedText);
-  if (askedForEditsWithoutResolvedItems) {
-    const unresolvedUnknown = [
-      ...matchedAdds.unknown,
-      ...interpretation.unknown_items,
-      ...interpretation.add_items.map((item) => item.name),
-    ]
-      .map((value) => value.trim())
-      .filter(Boolean);
-    const uniqueUnknown = [...new Set(unresolvedUnknown)].slice(0, 3);
-    const unknownReply = buildUnknownItemReplyData(
-      uniqueUnknown.length > 0 ? uniqueUnknown : [context.messageText],
-      context.menuItems,
-      prefersRomanUrdu,
-      context.semanticMatches,
-    );
-
-    return replyDecision(
-      unknownReply.text,
-      withPreferredLanguage(
-        {
-          workflow_step: "collecting_items",
-          summary_sent_at: null,
-          last_presented_options: unknownReply.selectableItems,
-          last_presented_options_at: unknownReply.selectableItems.length > 0 ? new Date().toISOString() : null,
-        },
-        preferredLanguage,
-      ),
-      trace,
-    );
-  }
-
-  if (shouldDeferToContextSwitchFallback(context.messageText, normalizedText, interpretation)) {
-    return {
-      kind: "fallback",
-      statePatch: withPreferredLanguage({ workflow_step: "awaiting_confirmation" }, preferredLanguage),
-      trace,
-    };
-  }
-
-  return replyDecision(
-    prefersRomanUrdu
-      ? "Order confirm karne ke liye *Haan* likhein, ya changes batayein."
-      : "Reply *Yes* to confirm your order, or tell me what to change.",
-    withPreferredLanguage({}, preferredLanguage),
-    trace,
-  );
-}
-
-function handleLogisticsAndFallback(params: {
-  context: TurnContext;
-  interpretation: OrderTurnInterpretation;
-  matchedAdds: MatchedItemsResult;
-  preferredLanguage: LanguagePreference;
-  trace: TurnTrace;
-}): TurnDecision {
-  const { context, interpretation, matchedAdds, preferredLanguage, trace } = params;
-  const state = context.state;
-  const prefersRomanUrdu = preferredLanguage === "roman_urdu";
-  const normalizedText = normalizeText(context.messageText);
-  const instructionCandidate = extractOrderInstructionCandidate(context.messageText);
-
-  if (
-    (state.workflow_step === "awaiting_order_type" ||
-      state.workflow_step === "awaiting_delivery_address" ||
-      state.workflow_step === "awaiting_dine_in_details" ||
-      state.workflow_step === "awaiting_confirmation") &&
-    state.cart.length === 0
-  ) {
-    return replyDecision(
-      prefersRomanUrdu
-        ? "Cart empty hai. Please pehle item add karein."
-        : "Your cart is empty. Please add an item first.",
-      withPreferredLanguage(
-        {
-          workflow_step: "collecting_items",
-          order_type: null,
-          address: null,
-          guests: null,
-          reservation_time: null,
-        },
-        preferredLanguage,
-      ),
-      trace,
-    );
-  }
-
-  if (state.workflow_step === "awaiting_upsell_reply") {
-    const isYesReply = isUpsellYes(normalizedText);
-    const isNoReply = isUpsellNo(normalizedText);
-
-    if (isYesReply && state.upsell_item_name && state.upsell_item_price != null) {
-      const sourceItem = context.menuItems.find(
-        (item) => normalizeText(item.name) === normalizeText(state.upsell_item_name ?? ""),
-      );
-      const upsellItem: DraftCartItem = {
-        name: state.upsell_item_name,
-        qty: 1,
-        price: state.upsell_item_price,
-        category: sourceItem?.category ?? null,
-        size: null,
-        addons: [],
-        item_instructions: null,
-      };
-      const nextCart = mergeCartItems(state.cart, [upsellItem]);
-
-      return replyDecision(
-        [
-          prefersRomanUrdu
-            ? `Theek hai, ${upsellItem.name} add kar diya.`
-            : `Great, I added ${upsellItem.name}.`,
-          buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu),
-        ].join("\n\n"),
-        withPreferredLanguage(
-          {
-            cart: nextCart,
-            workflow_step: "awaiting_order_type",
-            upsell_item_name: null,
-            upsell_item_price: null,
-          },
-          preferredLanguage,
-        ),
-        trace,
-        buildOrderTypeInteractiveList(prefersRomanUrdu, context.settings.delivery_enabled),
-      );
-    }
-
-    if (isNoReply || !state.upsell_item_name) {
-      const declined = state.upsell_item_name
-        ? [...new Set([...state.declined_upsells, state.upsell_item_name])]
-        : state.declined_upsells;
-
-      return replyDecision(
-        prefersRomanUrdu
-          ? `Theek hai, upsell skip kar diya. ${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)}`
-          : `No problem, skipped. ${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)}`,
-        withPreferredLanguage(
-          {
-            workflow_step: "awaiting_order_type",
-            upsell_item_name: null,
-            upsell_item_price: null,
-            declined_upsells: declined,
-          },
-          preferredLanguage,
-        ),
-        trace,
-        buildOrderTypeInteractiveList(prefersRomanUrdu, context.settings.delivery_enabled),
-      );
-    }
-
-    if (shouldDeferToContextSwitchFallback(context.messageText, normalizedText, interpretation)) {
-      return {
-        kind: "fallback",
-        statePatch: withPreferredLanguage({ workflow_step: "awaiting_upsell_reply" }, preferredLanguage),
-        trace,
-      };
-    }
-
-    const upsellInteractive = buildUpsellInteractiveList(prefersRomanUrdu, state.upsell_item_name || undefined, state.upsell_item_price || undefined);
-    return replyDecision(
-      prefersRomanUrdu
-        ? `*${state.upsell_item_name}* add karna chahenge?`
-        : `Would you like to add *${state.upsell_item_name}*?`,
-      withPreferredLanguage({ workflow_step: "awaiting_upsell_reply" }, preferredLanguage),
-      trace,
-      upsellInteractive,
-    );
-  }
-
-  if (state.workflow_step === "awaiting_order_type") {
-    const quickOrderType = parseOrderTypeShortcut(normalizedText);
-    if (quickOrderType) {
-      return handleOrderTypeSelection(context, state, preferredLanguage, quickOrderType, trace);
-    }
-
-    const generalQtyOverride = inferGeneralQtyOverride(normalizedText, state);
-    if (generalQtyOverride) {
-      const updatedCart = applyQtyOverride(state.cart, generalQtyOverride.name, generalQtyOverride.qty);
-      return replyDecision(
-        [
-          prefersRomanUrdu
-            ? `Theek hai, maine quantity update kar di: ${generalQtyOverride.name} x${generalQtyOverride.qty}.`
-            : `Done, quantity updated: ${generalQtyOverride.name} x${generalQtyOverride.qty}.`,
-          !context.isOpenNow
-            ? buildClosedReply(context.settings, prefersRomanUrdu, true)
-            : buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu),
-        ].join("\n\n"),
-        withPreferredLanguage(
-          {
-            cart: updatedCart,
-            workflow_step: context.isOpenNow ? "awaiting_order_type" : "collecting_items",
-          },
-          preferredLanguage,
-        ),
-        trace,
-      );
-    }
-
-    const lastItemOverrideQty = inferLastItemQtyOverride(normalizedText, state);
-    if (lastItemOverrideQty != null) {
-      const updatedCart = applyLastItemQtyOverride(state.cart, lastItemOverrideQty);
-      return replyDecision(
-        [
-          prefersRomanUrdu
-            ? `Theek hai, maine quantity update kar di: ${updatedCart[updatedCart.length - 1].name} x${lastItemOverrideQty}.`
-            : `Done, quantity updated: ${updatedCart[updatedCart.length - 1].name} x${lastItemOverrideQty}.`,
-          !context.isOpenNow
-            ? buildClosedReply(context.settings, prefersRomanUrdu, true)
-            : buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu),
-        ].join("\n\n"),
-        withPreferredLanguage(
-          {
-            cart: updatedCart,
-            workflow_step: context.isOpenNow ? "awaiting_order_type" : "collecting_items",
-          },
-          preferredLanguage,
-        ),
-        trace,
-      );
-    }
-
-    if (interpretation.order_type) {
-      return handleOrderTypeSelection(context, state, preferredLanguage, interpretation.order_type, trace);
-    }
-
-    if (shouldDeferToContextSwitchFallback(context.messageText, normalizedText, interpretation)) {
-      return {
-        kind: "fallback",
-        statePatch: withPreferredLanguage({ workflow_step: "awaiting_order_type" }, preferredLanguage),
-        trace,
-      };
-    }
-
-    return replyDecision(
-      prefersRomanUrdu
-        ? `${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)} Agar quantity ya item remove karna ho to bhi likh dein.`
-        : `${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)} You can also ask to remove items or change quantity.`,
-      withPreferredLanguage({ workflow_step: "awaiting_order_type" }, preferredLanguage),
-      trace,
-      buildOrderTypeInteractiveList(prefersRomanUrdu, context.settings.delivery_enabled),
-    );
-  }
-
-  if (state.workflow_step === "awaiting_delivery_address") {
-    if (interpretation.order_type === "dine-in") {
-      return handleOrderTypeSelection(context, state, preferredLanguage, "dine-in", trace);
-    }
-
-    const address = interpretation.address ?? parseAddress(context.messageText);
-    if (!address) {
-      if (shouldDeferToContextSwitchFallback(context.messageText, normalizedText, interpretation)) {
-        return {
-          kind: "fallback",
-          statePatch: withPreferredLanguage({ workflow_step: "awaiting_delivery_address" }, preferredLanguage),
-          trace,
-        };
-      }
-
-      const isRetrying = context.session.invalid_step_count > 0;
-      return replyDecision(
-        prefersRomanUrdu
-          ? isRetrying
-            ? "Mujhe address samajh nahi aaya. Please apna mukammal (full) delivery address clearly type karein. Agar masla ho to 'human' type karein."
-            : "Please apna poora delivery address bhej dein."
-          : isRetrying
-            ? "I couldn't quite understand the address. Could you please type your full delivery address clearly? If you're stuck, type 'human'."
-            : "Please send your full delivery address.",
-        withPreferredLanguage({ workflow_step: "awaiting_delivery_address" }, preferredLanguage),
-        trace,
-      );
-    }
-
-    return buildSummaryReply(
-      {
-        state: {
-          ...state,
-          preferred_language: preferredLanguage,
-          address,
-          order_type: "delivery",
-        },
-        settings: context.settings,
-      },
-      trace,
-    );
-  }
-
-  if (state.workflow_step === "awaiting_dine_in_details") {
-    if (interpretation.order_type === "delivery") {
-      return handleOrderTypeSelection(context, state, preferredLanguage, "delivery", trace);
-    }
-
-    const guests = interpretation.guests ?? parseGuestCount(normalizedText) ?? state.guests;
-    const reservationTime =
-      parseReservationTime(interpretation.reservation_time ?? context.messageText, {
-        opening_time: context.settings.opening_time,
-        closing_time: context.settings.closing_time,
-      }) ??
-      state.reservation_time;
-
-    if (!guests || !reservationTime) {
-      if (shouldDeferToContextSwitchFallback(context.messageText, normalizedText, interpretation)) {
-        return {
-          kind: "fallback",
-          statePatch: withPreferredLanguage(
-            {
-              workflow_step: "awaiting_dine_in_details",
-              guests: guests ?? null,
-              reservation_time: reservationTime ?? null,
-            },
-            preferredLanguage,
-          ),
-          trace,
-        };
-      }
-
-      const isRetrying = context.session.invalid_step_count > 0;
-      return replyDecision(
-        prefersRomanUrdu
-          ? isRetrying
-            ? "Mujhe details samajh nahi aayin. Please clearly batayein: Kitne guests honge aur kis time aana hai? Misal: *4 guests at 8 PM*."
-            : "Kitne guests honge aur kis time aana hai? Misal: *4 guests at 8 PM*."
-          : isRetrying
-            ? "I didn't catch the details. Please clearly state how many guests and what time? Example: *4 guests at 8 PM*."
-            : "How many guests and what time? Example: *4 guests at 8 PM*.",
-        withPreferredLanguage(
-          {
-            workflow_step: "awaiting_dine_in_details",
-            guests: guests ?? null,
-            reservation_time: reservationTime ?? null,
-          },
-          preferredLanguage,
-        ),
-        trace,
-      );
-    }
-
-    return buildSummaryReply(
-      {
-        state: {
-          ...state,
-          preferred_language: preferredLanguage,
-          order_type: "dine-in",
-          guests,
-          reservation_time: reservationTime,
-          address: null,
-        },
-        settings: context.settings,
-      },
-      trace,
-    );
-  }
-
-  if (state.cart.length > 0) {
-    if (instructionCandidate) {
-      return replyDecision(
-        prefersRomanUrdu
-          ? `Theek hai, order instructions update kar di: ${instructionCandidate}`
-          : `Sure, I updated your order instructions: ${instructionCandidate}`,
-        withPreferredLanguage(
-          {
-            ...buildPersistedStatePatch({
-              ...state,
-              customer_instructions: instructionCandidate,
-              preferred_language: preferredLanguage,
-            }),
-            workflow_step: "awaiting_order_type",
-          },
-          preferredLanguage,
-        ),
-        trace,
-        buildOrderTypeInteractiveList(prefersRomanUrdu, context.settings.delivery_enabled),
-      );
-    }
-
-    if (interpretation.order_type) {
-      return handleOrderTypeSelection(context, state, preferredLanguage, interpretation.order_type, trace);
-    }
-
-    return replyDecision(
-      prefersRomanUrdu
-        ? `${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)} Agar quantity ya item remove karna ho to bhi likh dein.`
-        : `${buildOrderTypePrompt(context.settings.delivery_enabled, prefersRomanUrdu)} You can also ask to remove items or change quantity.`,
-      withPreferredLanguage({ workflow_step: "awaiting_order_type" }, preferredLanguage),
-      trace,
-      buildOrderTypeInteractiveList(prefersRomanUrdu, context.settings.delivery_enabled),
-    );
-  }
-
-  if (matchedAdds.unknown.length > 0 || interpretation.unknown_items.length > 0) {
-    const unknown = [...new Set([...matchedAdds.unknown, ...interpretation.unknown_items])].slice(0, 3);
-    const unknownReply = buildUnknownItemReplyData(unknown, context.menuItems, prefersRomanUrdu, context.semanticMatches);
-      return replyDecision(
-      unknownReply.text,
-      withPreferredLanguage(
-        {
-          workflow_step: "collecting_items",
-          last_presented_options: unknownReply.selectableItems,
-          last_presented_options_at: unknownReply.selectableItems.length > 0 ? new Date().toISOString() : null,
-        },
-        preferredLanguage,
-      ),
-      trace,
-    );
-  }
-
-  if (interpretation.intent === "greeting") {
-    return replyDecision(
-      prefersRomanUrdu
-        ? "Ji, main yahan hoon. Aap *menu* likh dein ya item ka naam quantity ke sath bhej dein."
-        : "Hi, I am here to help. You can send *menu* or share an item name with quantity.",
-      withPreferredLanguage({}, preferredLanguage),
-      trace,
-    );
-  }
-
-  if (interpretation.intent === "chitchat" || interpretation.intent === "unknown") {
-    return {
-      kind: "fallback",
-      statePatch: withPreferredLanguage({}, preferredLanguage),
-      trace,
-    };
-  }
-
-  return replyDecision(
-    prefersRomanUrdu
-      ? "Aap *menu* likh dein ya item ka naam aur quantity bhej dein. Misal: *2 Chicken Biryani*."
-      : "You can send *menu* or item name with quantity, for example: *2 Chicken Biryani*.",
-    withPreferredLanguage({ workflow_step: "collecting_items" }, preferredLanguage),
-    trace,
-  );
 }
 
 function isDraftCartItemLike(value: unknown): value is DraftCartItem {
@@ -1971,48 +1418,6 @@ function isMenuCatalogItemLike(value: unknown): value is MenuCatalogItem {
     (typeof cast.category === "string" || cast.category === null) &&
     typeof cast.is_available === "boolean"
   );
-}
-
-function normalizeText(value: string): string {
-  const withAliasExpansion = value
-    .toLowerCase()
-    .replace(/\bice[\s-]?cream\b/g, "ice cream");
-  return withAliasExpansion
-    .toLowerCase()
-    .replace(/[-_]+/g, " ")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeCompact(value: string): string {
-  return normalizeText(value).replace(/\s+/g, "");
-}
-
-function tokenizeForMenuMatching(value: string): string[] {
-  return normalizeText(value)
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 2 && !MENU_TOKEN_STOP_WORDS.has(token));
-}
-
-function tokenOverlapScore(left: string, right: string): number {
-  const leftTokens = tokenizeForMenuMatching(left);
-  const rightTokens = tokenizeForMenuMatching(right);
-  if (leftTokens.length === 0 || rightTokens.length === 0) return 0;
-
-  let overlap = 0;
-  for (const token of leftTokens) {
-    const hasExact = rightTokens.includes(token);
-    const hasNear = rightTokens.some((candidate) => {
-      const minLength = Math.min(token.length, candidate.length);
-      if (minLength < 4) return false;
-      return token.includes(candidate) || candidate.includes(token);
-    });
-    if (hasExact || hasNear) overlap += 1;
-  }
-
-  return overlap / Math.max(leftTokens.length, rightTokens.length);
 }
 
 function isPresentedOptionsFresh(state: ConversationState): boolean {
@@ -2254,7 +1659,7 @@ function applyCheckoutSignalsToState(params: {
   } else if (explicitType === "dine-in") {
     next.order_type = "dine-in";
     next.address = null;
-    const guests = interpretation.guests ?? parseGuestCount(normalizedText) ?? next.guests;
+    const guests = interpretation.guests ?? parseGuestCount(normalizedText, clampQty) ?? next.guests;
     const reservationTime =
       parseReservationTime(interpretation.reservation_time ?? rawText, {
         opening_time: settings.opening_time,
@@ -2268,7 +1673,7 @@ function applyCheckoutSignalsToState(params: {
       next.address = address;
     }
   } else if (next.order_type === "dine-in") {
-    const guests = interpretation.guests ?? parseGuestCount(normalizedText) ?? next.guests;
+    const guests = interpretation.guests ?? parseGuestCount(normalizedText, clampQty) ?? next.guests;
     const reservationTime =
       parseReservationTime(interpretation.reservation_time ?? rawText, {
         opening_time: settings.opening_time,
@@ -2620,184 +2025,6 @@ function resetDraftState(): Partial<ConversationState> {
   };
 }
 
-function getMenuCategories(menuItems: MenuCatalogItem[]): string[] {
-  return [...new Set(menuItems.map((item) => item.category?.trim() || "General"))];
-}
-
-function parseCategoryMorePage(text: string): number | null {
-  const raw = text.trim();
-  const moreMatch = raw.match(/^category[_\s-]?more[_\s-]?(\d+)$/i);
-  if (!moreMatch) return null;
-
-  const page = Number.parseInt(moreMatch[1], 10);
-  if (!Number.isFinite(page) || page < 1) return null;
-  return page;
-}
-
-function buildCategoryListReply(
-  menuItems: MenuCatalogItem[],
-  romanUrdu: boolean,
-  page = 1,
-): {
-  text: string;
-  interactiveList?: {
-    body: string;
-    buttonText: string;
-    sectionTitle?: string;
-    rows: Array<{ id: string; title: string; description?: string }>;
-  } | null;
-} {
-  const categories = getMenuCategories(menuItems);
-  if (categories.length === 0) {
-    return {
-      text: romanUrdu
-        ? "Is branch ka menu filhal available nahi lag raha. *menu* dobara try karein ya branch confirm kar dein."
-        : "I could not find a live menu for this branch right now. Please try *menu* again or confirm your branch.",
-    };
-  }
-
-  const pageSize = 9;
-  const safePage = Math.max(1, page);
-  const start = (safePage - 1) * pageSize;
-  const visibleCategories = categories.slice(start, start + pageSize);
-  if (visibleCategories.length === 0) {
-    return buildCategoryListReply(menuItems, romanUrdu, 1);
-  }
-  const hasMore = start + pageSize < categories.length;
-
-  const text = [
-    "Available categories:",
-    ...visibleCategories.map((category, index) => `${start + index + 1}. ${category}`),
-    ...(hasMore
-      ? [
-          romanUrdu
-            ? "...mazeed categories ke liye *more* bhej dein."
-            : "...for more categories, send *more*.",
-        ]
-      : []),
-    romanUrdu
-      ? "Category ka *number* ya *name* bhej dein."
-      : "Reply with category *number* or *name*.",
-  ].join("\n");
-
-  let interactiveList: {
-    body: string;
-    buttonText: string;
-    sectionTitle?: string;
-    rows: Array<{ id: string; title: string; description?: string }>;
-  } | null = null;
-
-  if (visibleCategories.length >= 1) {
-    const rows = visibleCategories.map((category, index) => {
-      const absoluteIndex = start + index + 1;
-      const truncatedTitle = category.length > 24 ? category.slice(0, 21) + "..." : category;
-      return {
-        id: `category_option_${absoluteIndex}`,
-        title: truncatedTitle,
-        description: undefined,
-      };
-    });
-    if (hasMore) {
-      rows.push({
-        id: `category_more_${safePage + 1}`,
-        title: romanUrdu ? "More Categories" : "More Categories",
-        description: undefined,
-      });
-    }
-
-    interactiveList = {
-      body: romanUrdu
-        ? "Menu categories se ek select karein."
-        : "Choose a category from the menu.",
-      buttonText: romanUrdu ? "Select Category" : "Select Category",
-      sectionTitle: romanUrdu ? "Categories" : "Categories",
-      rows,
-    };
-  }
-
-  return { text, interactiveList };
-}
-
-function findCategoryRequest(text: string, menuItems: MenuCatalogItem[]): string | null {
-  const raw = text.trim();
-  const normalized = normalizeText(raw);
-  const categories = getMenuCategories(menuItems);
-
-  // Handle interactive list selection
-  const optionMatch = raw.match(/^category[_\s-]?option[_\s-]?(\d+)$/i);
-  if (optionMatch) {
-    const index = Number.parseInt(optionMatch[1], 10) - 1;
-    if (index >= 0 && index < categories.length) {
-      return categories[index];
-    }
-  }
-
-  const numberMatch = normalized.match(/^(?:category|cat|option|number)?\s*(\d{1,2})$/);
-  if (numberMatch) {
-    const index = Number.parseInt(numberMatch[1], 10) - 1;
-    if (index >= 0 && index < categories.length) {
-      return categories[index];
-    }
-  }
-
-  for (const category of categories) {
-    const normCategory = normalizeText(category);
-    if (normCategory && normalized.includes(normCategory)) return category;
-  }
-
-  const fuzzyCategory = categories
-    .map((category) => ({
-      category,
-      score: Math.max(
-        itemSimilarityScore(normalized, normalizeText(category)),
-        tokenOverlapScore(normalized, normalizeText(category)),
-      ),
-    }))
-    .filter((entry) => entry.score >= 0.52)
-    .sort((left, right) => right.score - left.score)[0];
-
-  if (fuzzyCategory) return fuzzyCategory.category;
-
-  return null;
-}
-
-function buildCategoryItemsReply(
-  category: string,
-  menuItems: MenuCatalogItem[],
-  romanUrdu: boolean,
-): { text: string; selectableItems: MenuCatalogItem[] } {
-  const target = normalizeText(category);
-  const rows = menuItems.filter((item) => normalizeText(item.category ?? "General") === target);
-  if (rows.length === 0) {
-    return {
-      text: romanUrdu
-        ? "Is category mein items nahi mile. Kisi aur category ka number ya naam bhej dein."
-        : "No items found in that category. Please send another category number or name.",
-      selectableItems: [],
-    };
-  }
-
-  const selectableItems = rows.slice(0, 10);
-  const lines = selectableItems.map((item, index) => `${index + 1}. ${item.name} - Rs. ${item.price}`);
-  if (rows.length > selectableItems.length) {
-    lines.push(
-      romanUrdu
-        ? `...aur ${rows.length - selectableItems.length} items bhi hain. Naam bhej kar search karein.`
-        : `...and ${rows.length - selectableItems.length} more. Send item name to search further.`,
-    );
-  }
-
-  const text = [
-    `*${category}* items:`,
-    ...lines,
-    romanUrdu
-      ? "Number ya item name ke sath quantity bhej dein (misal: *2* ya *2 Chicken Karahi*)."
-      : "Reply with number or item name and quantity (e.g., *2* or *2 Chicken Karahi*).",
-  ].join("\n");
-
-  return { text, selectableItems };
-}
-
 function buildClosedReply(settings: RestaurantSettings, romanUrdu: boolean, hasDraft: boolean): string {
   if (!settings.is_accepting_orders) {
     return romanUrdu
@@ -2884,35 +2111,6 @@ function buildQtyUpdatedItemsMessage(updates: CartQtyUpdate[]): string {
   if (updates.length === 0) return "";
   const summary = updates.map((item) => `${item.name} x${item.qty}`).join(", ");
   return `Quantity updated: ${summary}`;
-}
-
-function buildAmbiguousItemReply(query: string, options: MenuCatalogItem[], romanUrdu: boolean): string {
-  const lines = options.slice(0, 3).map((item, index) => `${index + 1}. ${item.name} - Rs. ${item.price}`);
-  return [
-    romanUrdu
-      ? `*${query}* se mutaliq kaunsa item chahiye?`
-      : `Which item did you mean for *${query}*?`,
-    ...lines,
-    romanUrdu ? "Number bhej dein." : "Reply with the number.",
-  ].join("\n");
-}
-
-function buildItemMatchesReply(query: string, options: MenuCatalogItem[], romanUrdu: boolean): string {
-  const lines = options.slice(0, 10).map((item, index) => `${index + 1}. ${item.name} - Rs. ${item.price}`);
-  const topResultsHint =
-    options.length >= 10
-      ? romanUrdu
-        ? "Top matches dikhaye gaye hain. Zyada exact result ke liye poora item name bhej dein."
-        : "Showing top matches. Send a more specific item name for broader accuracy."
-      : null;
-  return [
-    romanUrdu ? `*${query}* ke related items ye hain:` : `Here are matching items for *${query}*:`,
-    ...lines,
-    ...(topResultsHint ? [topResultsHint] : []),
-    romanUrdu
-      ? "Order ke liye number select karein ya item name + quantity bhej dein."
-      : "Reply with a number, or send item name with quantity to order.",
-  ].join("\n");
 }
 
 function buildUnknownItemReply(
@@ -3856,35 +3054,6 @@ function isGroundedItemRequest(rawText: string, requestName: string, semanticMat
   );
 }
 
-function itemSimilarityScore(left: string, right: string): number {
-  if (left === right) return 1;
-  if (left.includes(right) || right.includes(left)) return 0.85;
-
-  const leftCompact = normalizeCompact(left);
-  const rightCompact = normalizeCompact(right);
-  if (leftCompact && rightCompact) {
-    if (leftCompact === rightCompact && leftCompact.length >= 4) return 0.92;
-    const minCompactLength = Math.min(leftCompact.length, rightCompact.length);
-    if (minCompactLength >= 5 && (leftCompact.includes(rightCompact) || rightCompact.includes(leftCompact))) {
-      return 0.74;
-    }
-  }
-
-  const leftTokens = new Set(left.split(" ").filter(Boolean));
-  const rightTokens = new Set(right.split(" ").filter(Boolean));
-  if (leftTokens.size === 0 || rightTokens.size === 0) return 0;
-
-  let intersection = 0;
-  for (const token of leftTokens) {
-    if (rightTokens.has(token)) intersection += 1;
-  }
-
-  const union = new Set([...leftTokens, ...rightTokens]).size;
-  const jaccard = union > 0 ? intersection / union : 0;
-  const compactBonus = normalizeCompact(left) === normalizeCompact(right) ? 0.2 : 0;
-  return Math.min(1, jaccard + compactBonus);
-}
-
 function findLikelyMenuSuggestions(text: string, menuItems: MenuCatalogItem[], limit = 3): MenuCatalogItem[] {
   const normalized = normalizeText(text);
   const queryTokens = normalized
@@ -4459,184 +3628,4 @@ function applyLastItemQtyOverride(cart: DraftCartItem[], qty: number): DraftCart
   return updated;
 }
 
-function parseAddress(raw: string): string | null {
-  const compact = raw.trim().replace(/\s+/g, " ");
-  if (!compact || compact.length < 8) return null;
-  const normalized = normalizeText(compact);
-  const hasHint = ADDRESS_HINTS.some((hint) => normalized.includes(hint));
-  const hasNumber = /\d/.test(compact);
-  if (!hasHint || !hasNumber) return null;
-  return compact;
-}
-
-function parseGuestCount(text: string): number | null {
-  const match = text.match(/(\d{1,2})\s*(guest|guests|person|people|bande|seats?|table)/i);
-  if (match) return clampQty(Number.parseInt(match[1], 10));
-
-  const tokenized = normalizeText(text).split(" ");
-  for (const token of tokenized) {
-    const parsed = parseNumericToken(token);
-    if (parsed && parsed > 0) return clampQty(parsed);
-  }
-  return null;
-}
-
-function isWithinOperatingHoursForTime(requestedHours: number, requestedMinutes: number, openingTime: string, closingTime: string): boolean {
-  const parsedOpening = parseRestaurantClock(openingTime);
-  const parsedClosing = parseRestaurantClock(closingTime);
-  if (!parsedOpening || !parsedClosing) return false;
-
-  const totalRequestedMinutes = requestedHours * 60 + requestedMinutes;
-
-  if (parsedClosing.totalMinutes < parsedOpening.totalMinutes) {
-    return totalRequestedMinutes >= parsedOpening.totalMinutes || totalRequestedMinutes <= parsedClosing.totalMinutes;
-  }
-
-  return totalRequestedMinutes >= parsedOpening.totalMinutes && totalRequestedMinutes <= parsedClosing.totalMinutes;
-}
-function parseReservationTime(text: string, settings?: { opening_time: string; closing_time: string }): string | null {
-  const normalized = text.trim();
-  const amPm = normalized.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/i);
-  const twentyFour = normalized.match(/\b(\d{1,2}):(\d{2})\b/);
-  const relative = normalized.match(/in\s+(\d{1,3})\s*(minute|minutes|min|hour|hours|hr)/i);
-
-  let hours: number | null = null;
-  let minutes = 0;
-
-  if (relative) {
-    const amount = Number.parseInt(relative[1], 10);
-    const unit = relative[2].toLowerCase();
-    const now = getRestaurantNowParts();
-    const nowTotalMinutes = now.hour * 60 + now.minute;
-
-    let targetMinutes: number;
-    if (unit.startsWith('hour') || unit.startsWith('hr')) {
-      targetMinutes = nowTotalMinutes + (amount * 60);
-    } else {
-      targetMinutes = nowTotalMinutes + amount;
-    }
-
-    hours = Math.floor(targetMinutes / 60) % 24;
-    minutes = targetMinutes % 60;
-
-    // If it's past midnight, assume next day
-    const year = now.year;
-    let month = now.month;
-    let day = now.day;
-    if (targetMinutes >= 24 * 60) {
-      const rollover = new Date(Date.UTC(now.year, now.month - 1, now.day, 12, 0, 0));
-      rollover.setUTCDate(rollover.getUTCDate() + 1);
-      month = rollover.getUTCMonth() + 1;
-      day = rollover.getUTCDate();
-    }
-
-    const parsedTime = buildRestaurantDateTimeIso(year, month, day, hours, minutes);
-
-    // Validate against operating hours if settings provided
-    if (settings && !isWithinOperatingHoursForTime(hours, minutes, settings.opening_time, settings.closing_time)) {
-      return null; // Invalid time
-    }
-
-    return parsedTime;
-  }
-
-  if (amPm) {
-    hours = Number.parseInt(amPm[1], 10);
-    minutes = amPm[2] ? Number.parseInt(amPm[2], 10) : 0;
-    const period = amPm[3].toLowerCase();
-    if (period === "pm" && hours !== 12) hours += 12;
-    if (period === "am" && hours === 12) hours = 0;
-  } else if (twentyFour) {
-    hours = Number.parseInt(twentyFour[1], 10);
-    minutes = Number.parseInt(twentyFour[2], 10);
-  }
-
-  if (hours == null || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
-
-  // Validate against operating hours if settings provided
-  if (settings && !isWithinOperatingHoursForTime(hours, minutes, settings.opening_time, settings.closing_time)) {
-    return null; // Invalid time
-  }
-
-  const now = getRestaurantNowParts();
-  let year = now.year;
-  let month = now.month;
-  let day = now.day;
-  const requestedTotal = hours * 60 + minutes;
-  const nowTotal = now.hour * 60 + now.minute;
-
-  if (requestedTotal < nowTotal) {
-    const rollover = new Date(Date.UTC(now.year, now.month - 1, now.day, 12, 0, 0));
-    rollover.setUTCDate(rollover.getUTCDate() + 1);
-    year = rollover.getUTCFullYear();
-    month = rollover.getUTCMonth() + 1;
-    day = rollover.getUTCDate();
-  }
-
-  return buildRestaurantDateTimeIso(year, month, day, hours, minutes);
-}
-
-function getGreetingReply(rawText: string, romanUrdu: boolean): string {
-  const text = rawText.toLowerCase();
-  const isSalam = /\b(assalam|aoa|salam)\b/.test(text);
-
-  if (romanUrdu) {
-    return isSalam
-      ? "Walaikum Assalam! Aapko kya order karna hai? Item ka naam bhej dein."
-      : "Hello! Aapko kya order karna hai? Item ka naam bhej dein.";
-  } else {
-    return isSalam
-      ? "Walaikum Assalam! What would you like to order? Send any item name."
-      : "Hello! What would you like to order? Send any item name.";
-  }
-}
-
-function isSimpleGreetingPattern(text: string): boolean {
-  const normalized = text.toLowerCase().trim();
-  return /\b(assalam|aoa|salam|hello|hi|hey|good\s+(morning|afternoon|evening)|namaste|namaskar)\b/i.test(normalized) &&
-         normalized.split(/\s+/).length <= 5; // Simple greetings are usually short
-}
-
-function isSimpleAcknowledgmentPattern(text: string): boolean {
-  const normalized = text.toLowerCase().trim();
-  const simpleWords = /\b(ok|okay|yes|no|thanks|thank\s+you|shukriya|theek|fine|good|alright|sure|haan|na|nahi|acha|thik)\b/i;
-  return simpleWords.test(normalized) && normalized.split(/\s+/).length <= 3;
-}
-
-function parseNumericToken(token: string): number | null {
-  if (/^\d+$/.test(token)) return Number.parseInt(token, 10);
-  if (token in NUMBER_WORDS) return NUMBER_WORDS[token];
-  return null;
-}
-
-function extractAnyQuantity(text: string): number | null {
-  const tokens = normalizeText(text).split(" ");
-  for (const token of tokens) {
-    const value = parseNumericToken(token);
-    if (value != null) return value;
-  }
-  return null;
-}
-
-function extractQuantityNearPhrase(text: string, phrase: string): number | null {
-  const tokens = text.split(" ");
-  const phraseTokens = phrase.split(" ");
-
-  for (let index = 0; index <= tokens.length - phraseTokens.length; index += 1) {
-    const window = tokens.slice(index, index + phraseTokens.length).join(" ");
-    if (window !== phrase) continue;
-
-    const around = [
-      ...tokens.slice(Math.max(0, index - 3), index),
-      ...tokens.slice(index + phraseTokens.length, index + phraseTokens.length + 2),
-    ];
-    for (const token of around.reverse()) {
-      const parsed = parseNumericToken(token);
-      if (parsed != null) return parsed;
-    }
-    return 1;
-  }
-
-  return null;
-}
 

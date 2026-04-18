@@ -10,12 +10,8 @@ import {
   type BranchSummary,
 } from "@/lib/branches";
 import { escalateToHuman, resumeBotForConversation } from "@/lib/handoff";
-import {
-  OutboundMessageError,
-  sendAndPersistOutboundFlowMessage,
-  sendAndPersistOutboundInteractiveMessage,
-  sendAndPersistOutboundMessage,
-} from "@/lib/messages";
+import { sendAndPersistAssistantMessage } from "@/lib/assistant-dispatcher";
+import { OutboundMessageError } from "@/lib/messages";
 import {
   decideTurn,
   getDefaultConversationState,
@@ -33,9 +29,22 @@ import { getRestaurantSettings, isWithinOperatingHours } from "@/lib/settings";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { buildSessionUpdate, getDefaultUserSession, getOrCreateUserSession, updateUserSession } from "@/lib/user-session";
 import {
-  buildWhatsAppFlowPayload,
+  buildBranchSelectionFlowMessage,
+  buildFlowMessageForAgentReply,
+  buildInteractiveListForBranches,
+  buildInteractiveListForPresentedOptions,
+} from "@/lib/webhook-interactive-builders";
+import {
+  buildCityBranchGroups,
+  buildInteractiveCategoryList,
+  buildInteractiveListForCities,
+  findCitySelection,
+  getCitySelectionPrompt,
+  normalizeCityValue,
+  type CityBranchGroup,
+} from "@/lib/webhook-city-helpers";
+import {
   extractFlowResponseCommand,
-  type WhatsAppFlowContext,
 } from "@/lib/whatsapp-flow";
 import {
   claimWebhookEvent,
@@ -47,7 +56,6 @@ import {
   sendWhatsAppInteractiveFlow,
   sendWhatsAppInteractiveList,
   sendWhatsAppMessage,
-  type WhatsAppInteractiveFlowPayload,
 } from "@/lib/whatsapp";
 
 function shouldResumeBotFromHumanMessage(content: string): boolean {
@@ -136,11 +144,6 @@ type MessageRow = {
 
 type PersistedUserMessage = {
   message: MessageRow | null;
-};
-
-type CityBranchGroup = {
-  city: string;
-  branches: BranchSummary[];
 };
 
 export const runtime = "nodejs";
@@ -285,13 +288,13 @@ async function processWebhook(body: unknown) {
           const selectedMenuItems = await getMenuCatalog(selectedBranch.id);
           const categoryInteractiveList = buildInteractiveCategoryList(selectedMenuItems, prefersRomanUrdu, 1);
 
-          await sendAndPersistAssistantMessage(
-            selectedConversation.id,
-            message.from,
-            assistantReply,
-            categoryInteractiveList,
-            null,
-          );
+          await sendAndPersistAssistantMessage({
+            conversationId: selectedConversation.id,
+            phone: message.from,
+            content: assistantReply,
+            interactiveList: categoryInteractiveList,
+            flowMessage: null,
+          });
 
           await markMessageProcessed(
             selectedState,
@@ -375,13 +378,13 @@ async function processWebhook(body: unknown) {
       const selectedMenuItems = await getMenuCatalog(selectedBranch.id);
       const categoryInteractiveList = buildInteractiveCategoryList(selectedMenuItems, prefersRomanUrdu, 1);
 
-      await sendAndPersistAssistantMessage(
-        selectedConversation.id,
-        message.from,
-        assistantReply,
-        categoryInteractiveList,
-        null,
-      );
+      await sendAndPersistAssistantMessage({
+        conversationId: selectedConversation.id,
+        phone: message.from,
+        content: assistantReply,
+        interactiveList: categoryInteractiveList,
+        flowMessage: null,
+      });
 
       await markMessageProcessed(
         selectedState,
@@ -455,13 +458,13 @@ async function processWebhook(body: unknown) {
           workflowStep: state.workflow_step,
           body: nonTextReply,
         });
-      await sendAndPersistAssistantMessage(
-        conversation.id,
-        message.from,
-        nonTextReply,
-        null,
-        nonTextFlow,
-      );
+        await sendAndPersistAssistantMessage({
+          conversationId: conversation.id,
+          phone: message.from,
+          content: nonTextReply,
+          interactiveList: null,
+          flowMessage: nonTextFlow,
+        });
       }
       await markMessageProcessed(state, message.id, createdAt, null);
       continue;
@@ -489,13 +492,13 @@ async function processWebhook(body: unknown) {
         branches,
         body: cityInteractiveList ? cityInteractiveList.body : cityPrompt,
       });
-      await sendAndPersistAssistantMessage(
-        conversation.id,
-        message.from,
-        cityInteractiveList ? cityInteractiveList.body : cityPrompt,
-        cityInteractiveList,
-        branchFlow,
-      );
+      await sendAndPersistAssistantMessage({
+        conversationId: conversation.id,
+        phone: message.from,
+        content: cityInteractiveList ? cityInteractiveList.body : cityPrompt,
+        interactiveList: cityInteractiveList,
+        flowMessage: branchFlow,
+      });
       await markMessageProcessed(state, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
       const session = await getOrCreateUserSession(conversation.id);
       await updateUserSession(
@@ -1030,7 +1033,13 @@ async function drainConversationQueue(conversation: ConversationRow) {
                 body: reply,
               });
 
-        await sendAndPersistAssistantMessage(conversation.id, conversation.phone, reply, interactiveList, flowMessage);
+        await sendAndPersistAssistantMessage({
+          conversationId: conversation.id,
+          phone: conversation.phone,
+          content: reply,
+          interactiveList,
+          flowMessage,
+        });
         await updateConversationState(state, {
           ...updatedState,
           last_processed_user_message_id: nextMessage.whatsapp_msg_id,
@@ -1124,7 +1133,11 @@ async function drainConversationQueue(conversation: ConversationRow) {
             ? "Maazrat, system is waqt thora busy hai. Thori dair mein dubara message bhej dein ya urgent help ke liye call karein."
             : "I'm sorry, the system is a little busy right now. Please send your message again in a moment or call us for urgent help.";
         try {
-          await sendAndPersistAssistantMessage(conversation.id, conversation.phone, fallback);
+          await sendAndPersistAssistantMessage({
+            conversationId: conversation.id,
+            phone: conversation.phone,
+            content: fallback,
+          });
           await updateConversationState(state, {
             last_processed_user_message_id: nextMessage.whatsapp_msg_id,
             last_processed_message_seq: nextMessage.ingest_seq,
@@ -1241,73 +1254,6 @@ async function getConversationHistoryUpTo(conversationId: string, ingestSeq: num
     role: row.role,
     content: row.content,
   }));
-}
-
-async function sendAndPersistAssistantMessage(
-  conversationId: string,
-  phone: string,
-  content: string,
-  interactiveList?: {
-    body: string;
-    buttonText: string;
-    sectionTitle?: string;
-    rows: Array<{ id: string; title: string; description?: string }>;
-  } | null,
-  flowMessage?: WhatsAppInteractiveFlowPayload | null,
-) {
-  if (flowMessage) {
-    const flowVisibleBody = flowMessage.body?.trim();
-    const flowPersistedContent = flowVisibleBody && flowVisibleBody.length > 0 ? flowVisibleBody : content;
-    try {
-      await sendAndPersistOutboundFlowMessage({
-        conversationId,
-        phone,
-        content: flowPersistedContent,
-        senderKind: "ai",
-        flow: flowMessage,
-      });
-      return;
-    } catch (error) {
-      if (!(error instanceof OutboundMessageError && !error.messageSent)) {
-        throw error;
-      }
-    }
-  }
-
-  if (interactiveList && interactiveList.rows.length > 0) {
-    const interactiveVisibleBody = interactiveList.body?.trim();
-    const interactivePersistedContent =
-      interactiveVisibleBody && interactiveVisibleBody.length > 0 ? interactiveVisibleBody : content;
-    try {
-      await sendAndPersistOutboundInteractiveMessage({
-        conversationId,
-        phone,
-        content: interactivePersistedContent,
-        senderKind: "ai",
-        interactive: interactiveList,
-      });
-      return;
-    } catch (error) {
-      if (error instanceof OutboundMessageError && !error.messageSent) {
-        await sendAndPersistOutboundMessage({
-          conversationId,
-          phone,
-          content: `${content}\n\n${buildInteractiveFallbackText(interactiveList)}`,
-          senderKind: "ai",
-        });
-        return;
-      }
-
-      throw error;
-    }
-  }
-
-  await sendAndPersistOutboundMessage({
-    conversationId,
-    phone,
-    content,
-    senderKind: "ai",
-  });
 }
 
 async function markMessageProcessed(
@@ -1491,154 +1437,6 @@ async function createOrderFromPayload(
   return order;
 }
 
-function buildInteractiveListForPresentedOptions(
-  options: MenuCatalogItem[],
-  prefersRomanUrdu: boolean,
-):
-  | {
-    body: string;
-    buttonText: string;
-    sectionTitle?: string;
-    rows: Array<{ id: string; title: string; description?: string }>;
-  }
-  | null {
-  if (!Array.isArray(options) || options.length < 1) {
-    return null;
-  }
-
-  const rows = options.slice(0, 10).map((item) => ({
-    id: item.id,
-    title: item.name,
-    description: `Rs. ${item.price}${item.category ? ` - ${item.category}` : ""}`,
-  }));
-
-  return {
-    body: prefersRomanUrdu
-      ? "Apni pasand ka item list se select karein."
-      : "Please choose your item from the list.",
-    buttonText: prefersRomanUrdu ? "Select Item" : "Select Item",
-    sectionTitle: prefersRomanUrdu ? "Menu Options" : "Menu Options",
-    rows,
-  };
-}
-
-function buildInteractiveListForBranches(
-  branches: BranchSummary[],
-  prefersRomanUrdu: boolean,
-  selectedCity?: string,
-):
-  | {
-    body: string;
-    buttonText: string;
-    sectionTitle?: string;
-    rows: Array<{ id: string; title: string; description?: string }>;
-  }
-  | null {
-  if (!Array.isArray(branches) || branches.length < 1) {
-    return null;
-  }
-
-  const rows = branches.slice(0, 10).map((branch) => ({
-    id: branch.id,
-    title: branch.name,
-    description: branch.address || undefined,
-  }));
-
-  return {
-    body: prefersRomanUrdu
-      ? selectedCity
-        ? `*${selectedCity}* mein apni branch select karein.`
-        : "Order shuru karne se pehle apni branch select karein."
-      : selectedCity
-        ? `Please choose your branch in *${selectedCity}*.`
-        : "Before we start your order, please choose your branch.",
-    buttonText: prefersRomanUrdu ? "Select Branch" : "Select Branch",
-    sectionTitle: prefersRomanUrdu ? "Branches" : "Branches",
-    rows,
-  };
-}
-
-function buildBranchSelectionFlowMessage(
-  phone: string,
-  branches: BranchSummary[],
-  prefersRomanUrdu: boolean,
-): WhatsAppInteractiveFlowPayload | null {
-  return buildWhatsAppFlowPayload({
-    context: "branch",
-    body: prefersRomanUrdu
-      ? "Branch choose karne ke liye rich menu khol dein."
-      : "Open the rich branch picker to continue.",
-    preferredLanguage: prefersRomanUrdu ? "roman_urdu" : "english",
-    branches,
-    workflowStep: "awaiting_branch_selection",
-    conversationId: phone,
-  });
-}
-
-function buildFlowMessageForAgentReply(input: {
-  context?: WhatsAppFlowContext;
-  conversationId: string;
-  prefersRomanUrdu: boolean;
-  workflowStep: ConversationState["workflow_step"];
-  branch?: { id: string; slug?: string | null; name: string; address?: string | null } | null;
-  branches?: BranchSummary[];
-  menuItems?: MenuCatalogItem[];
-  cart?: ConversationState["cart"];
-  customerInstructions?: ConversationState["customer_instructions"];
-  orderType?: ConversationState["order_type"];
-  address?: ConversationState["address"];
-  guests?: ConversationState["guests"];
-  reservationTime?: ConversationState["reservation_time"];
-  settings?: Awaited<ReturnType<typeof getRestaurantSettings>>;
-  suggestedUpsell?: { name: string; price: number } | null;
-  body: string;
-}): WhatsAppInteractiveFlowPayload | null {
-  const context = input.context ?? inferFlowContext(input.workflowStep);
-  if (!context) return null;
-
-  return buildWhatsAppFlowPayload({
-    context,
-    conversationId: input.conversationId,
-    body: input.body,
-    preferredLanguage: input.prefersRomanUrdu ? "roman_urdu" : "english",
-    workflowStep: input.workflowStep,
-    branch: input.branch ?? undefined,
-    branches: input.branches,
-    menuItems: input.menuItems,
-    cart: input.cart,
-    customerInstructions: input.customerInstructions,
-    orderType: input.orderType,
-    address: input.address,
-    guests: input.guests,
-    reservationTime: input.reservationTime,
-    settings: input.settings,
-    suggestedUpsell: input.suggestedUpsell,
-  });
-}
-
-function inferFlowContext(workflowStep: ConversationState["workflow_step"]): WhatsAppFlowContext | null {
-  if (workflowStep === "awaiting_branch_selection") return "branch";
-  if (workflowStep === "awaiting_upsell_reply") return "upsell";
-  if (
-    workflowStep === "awaiting_order_type" ||
-    workflowStep === "awaiting_delivery_address" ||
-    workflowStep === "awaiting_dine_in_details" ||
-    workflowStep === "awaiting_confirmation"
-  ) {
-    return "checkout";
-  }
-
-  if (
-    workflowStep === "idle" ||
-    workflowStep === "collecting_items" ||
-    workflowStep === "awaiting_resume_decision"
-  ) {
-    return "menu";
-  }
-
-  return null;
-}
-
 async function sendBranchSelectionMessage(
   phone: string,
   branches: BranchSummary[],
@@ -1714,210 +1512,6 @@ function getBranchSelectionPromptForCity(
     ...branches.map((branch, index) => `${index + 1}. ${branch.name}${branch.address ? ` - ${branch.address}` : ""}`),
     closing,
   ].join("\n");
-}
-
-function buildInteractiveListForCities(
-  cities: string[],
-  prefersRomanUrdu: boolean,
-):
-  | {
-    body: string;
-    buttonText: string;
-    sectionTitle?: string;
-    rows: Array<{ id: string; title: string; description?: string }>;
-  }
-  | null {
-  const uniqueCities = dedupeCities(cities);
-  if (uniqueCities.length < 1) {
-    return null;
-  }
-
-  const rows = uniqueCities.slice(0, 10).map((city, index) => ({
-    id: `city_option_${index + 1}`,
-    title: city,
-  }));
-
-  return {
-    body: prefersRomanUrdu
-      ? "Welcome! Sab se pehle apna city select karein."
-      : "Welcome! First, please choose your city.",
-    buttonText: prefersRomanUrdu ? "Select City" : "Select City",
-    sectionTitle: prefersRomanUrdu ? "Cities" : "Cities",
-    rows,
-  };
-}
-
-function getUniqueMenuCategories(menuItems: MenuCatalogItem[]): string[] {
-  return [...new Set(menuItems.map((item) => item.category?.trim() || "General"))];
-}
-
-function buildInteractiveCategoryList(
-  menuItems: MenuCatalogItem[],
-  prefersRomanUrdu: boolean,
-  page: number,
-):
-  | {
-    body: string;
-    buttonText: string;
-    sectionTitle?: string;
-    rows: Array<{ id: string; title: string; description?: string }>;
-  }
-  | null {
-  const categories = getUniqueMenuCategories(menuItems);
-  if (categories.length < 2) return null;
-
-  const pageSize = 9;
-  const safePage = Math.max(1, page);
-  const start = (safePage - 1) * pageSize;
-  if (start >= categories.length) return null;
-
-  const pageCategories = categories.slice(start, start + pageSize);
-  const rows = pageCategories.map((category, index) => {
-    const absoluteIndex = start + index + 1;
-    const title = category.length > 24 ? `${category.slice(0, 21)}...` : category;
-    return {
-      id: `category_option_${absoluteIndex}`,
-      title,
-    };
-  });
-
-  const hasMore = start + pageSize < categories.length;
-  if (hasMore) {
-    rows.push({
-      id: `category_more_${safePage + 1}`,
-      title: prefersRomanUrdu ? "More Categories" : "More Categories",
-    });
-  }
-
-  return {
-    body: prefersRomanUrdu
-      ? "Menu categories se ek select karein."
-      : "Choose a category from the menu.",
-    buttonText: prefersRomanUrdu ? "Select Category" : "Select Category",
-    sectionTitle: prefersRomanUrdu ? "Categories" : "Categories",
-    rows,
-  };
-}
-
-function getCitySelectionPrompt(cities: string[], prefersRomanUrdu: boolean): string {
-  const uniqueCities = dedupeCities(cities);
-  if (uniqueCities.length === 0) {
-    return prefersRomanUrdu
-      ? "Maazrat, abhi city list available nahi hai. Thori dair baad try karein."
-      : "Sorry, city options are not available right now. Please try again shortly.";
-  }
-
-  const intro = prefersRomanUrdu
-    ? "Welcome! Sab se pehle apna city select karein:"
-    : "Welcome! First, please choose your city:";
-  const closing = prefersRomanUrdu
-    ? "Reply mein city ka naam bhej dein."
-    : "Reply with your city name.";
-
-  return [intro, ...uniqueCities.map((city, index) => `${index + 1}. ${city}`), closing].join("\n");
-}
-
-function findCitySelection(input: string, cities: string[]): string | null {
-  const uniqueCities = dedupeCities(cities);
-  const raw = input.trim();
-  const normalizedInput = normalizeCityValue(raw);
-  if (!normalizedInput || uniqueCities.length === 0) return null;
-
-  const optionMatch = raw.match(/^city[_\s-]?option[_\s-]?(\d+)$/i);
-  if (optionMatch) {
-    const index = Number.parseInt(optionMatch[1], 10) - 1;
-    if (index >= 0 && index < uniqueCities.length) {
-      return uniqueCities[index];
-    }
-  }
-
-  const numberMatch = normalizedInput.match(/\b(\d{1,2})\b/);
-  if (numberMatch) {
-    const index = Number.parseInt(numberMatch[1], 10) - 1;
-    if (index >= 0 && index < uniqueCities.length) {
-      return uniqueCities[index];
-    }
-  }
-
-  const exact = uniqueCities.find((city) => normalizeCityValue(city) === normalizedInput);
-  if (exact) return exact;
-
-  const fuzzy = uniqueCities.find((city) => {
-    const normalizedCity = normalizeCityValue(city);
-    return normalizedCity.includes(normalizedInput) || normalizedInput.includes(normalizedCity);
-  });
-
-  return fuzzy ?? null;
-}
-
-function normalizeCityValue(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function dedupeCities(cities: string[]): string[] {
-  const seen = new Set<string>();
-  const deduped: string[] = [];
-
-  for (const city of cities) {
-    const normalized = normalizeCityValue(city);
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    deduped.push(city.trim());
-  }
-
-  return deduped;
-}
-
-async function buildCityBranchGroups(branches: BranchSummary[]): Promise<CityBranchGroup[]> {
-  if (branches.length === 0) return [];
-
-  const grouped = new Map<string, CityBranchGroup>();
-  for (const branch of branches) {
-    const rawCity = branch.city?.trim() || deriveCityFromAddress(branch.address);
-    const normalizedCity = normalizeCityValue(rawCity);
-    if (!normalizedCity) continue;
-
-    const existing = grouped.get(normalizedCity);
-    if (existing) {
-      existing.branches.push(branch);
-      continue;
-    }
-
-    grouped.set(normalizedCity, {
-      city: rawCity.trim(),
-      branches: [branch],
-    });
-  }
-
-  return Array.from(grouped.values()).sort((left, right) => left.city.localeCompare(right.city));
-}
-
-function deriveCityFromAddress(address: string | null | undefined): string {
-  const fallbackCity = process.env.NEXT_PUBLIC_APP_CITY?.trim() || "Wah Cantt";
-  if (!address) return fallbackCity;
-
-  const parts = address
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
-
-  return parts.length > 0 ? parts[parts.length - 1] : fallbackCity;
-}
-
-function buildInteractiveFallbackText(payload: {
-  body: string;
-  rows: Array<{ title: string; description?: string }>;
-}) {
-  const options = payload.rows
-    .slice(0, 10)
-    .map((row, index) => `${index + 1}. ${row.title}${row.description ? ` - ${row.description}` : ""}`)
-    .join("\n");
-
-  return [payload.body, options].filter(Boolean).join("\n");
 }
 
 function shouldStartFreshOrderAfterInactivity(state: ConversationState, incomingCreatedAt: string): boolean {

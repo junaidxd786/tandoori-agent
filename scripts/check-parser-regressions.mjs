@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 const root = process.cwd();
-const target = path.join(root, "lib", "order-engine.ts");
+const engineTarget = path.join(root, "lib", "order-engine.ts");
+const textUtilsTarget = path.join(root, "lib", "order-text-utils.ts");
 
 function fail(message) {
   console.error(`FAIL: ${message}`);
@@ -22,16 +23,22 @@ function mustInclude(source, token, message) {
   return true;
 }
 
-if (!fs.existsSync(target)) {
-  fail(`Missing target file: ${target}`);
+if (!fs.existsSync(engineTarget)) {
+  fail(`Missing target file: ${engineTarget}`);
   process.exit();
 }
 
-const source = fs.readFileSync(target, "utf8");
+if (!fs.existsSync(textUtilsTarget)) {
+  fail(`Missing target file: ${textUtilsTarget}`);
+  process.exit();
+}
+
+const source = fs.readFileSync(engineTarget, "utf8");
+const textUtilsSource = fs.readFileSync(textUtilsTarget, "utf8");
 
 // 1) Ice-cream alias normalization should stay in place.
 mustInclude(
-  source,
+  textUtilsSource,
   ".replace(/\\bice[\\s-]?cream\\b/g, \"ice cream\")",
   "Missing ice-cream alias normalization.",
 );
@@ -82,4 +89,3 @@ mustInclude(
 if (process.exitCode && process.exitCode !== 0) {
   process.exit(process.exitCode);
 }
-

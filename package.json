@@ -11,7 +11,9 @@
     "check:interactive-guards": "node scripts/check-interactive-guards.mjs",
     "check:parser-regressions": "node scripts/check-parser-regressions.mjs",
     "check:intent-phrase-table": "node scripts/check-intent-phrase-table.mjs",
-    "check:all-guards": "npm run check:category-routing && npm run check:interactive-guards && npm run check:parser-regressions && npm run check:intent-phrase-table"
+    "check:flow-handlers": "node --no-warnings --experimental-strip-types scripts/check-order-flow-handlers.mjs",
+    "check:webhook-helpers": "node --no-warnings --experimental-strip-types scripts/check-webhook-helpers.mjs",
+    "check:all-guards": "npm run check:category-routing && npm run check:interactive-guards && npm run check:parser-regressions && npm run check:intent-phrase-table && npm run check:flow-handlers && npm run check:webhook-helpers"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",
