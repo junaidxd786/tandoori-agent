@@ -307,6 +307,39 @@ const MENU_TOKEN_STOP_WORDS = new Set([
   "quantity",
 ]);
 
+const MENU_LOOKUP_FILLER_WORDS = new Set([
+  "show",
+  "list",
+  "give",
+  "send",
+  "tell",
+  "find",
+  "what",
+  "which",
+  "any",
+  "all",
+  "me",
+  "us",
+  "the",
+  "a",
+  "an",
+  "do",
+  "you",
+  "have",
+  "available",
+  "option",
+  "options",
+  "item",
+  "items",
+  "menu",
+  "please",
+  "can",
+  "could",
+  "would",
+  "i",
+  "we",
+]);
+
 const PRESENTED_OPTIONS_TTL_MS = 20 * 60 * 1000;
 
 function isShortAcknowledgment(normalizedText: string): boolean {
@@ -788,6 +821,51 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
       withPreferredLanguage({}, preferredLanguage),
       trace,
     );
+  }
+
+  const directLookupQuery =
+    !expectsStructuredCheckoutInput(state.workflow_step) &&
+    interpretation.add_items.length === 0 &&
+    interpretation.remove_items.length === 0 &&
+    interpretation.intent !== "set_order_type" &&
+    interpretation.intent !== "provide_address" &&
+    interpretation.intent !== "provide_dine_in_details"
+      ? extractStandaloneMenuLookupQuery(rawText, normalizedText)
+      : null;
+  if (directLookupQuery) {
+    const category = findCategoryRequest(directLookupQuery, menuItems);
+    if (category) {
+      const categoryReply = buildCategoryItemsReply(category, menuItems, prefersRomanUrdu);
+      return replyDecision(
+        categoryReply.text,
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_category: category,
+            last_presented_options: categoryReply.selectableItems,
+            last_presented_options_at: categoryReply.selectableItems.length > 0 ? new Date().toISOString() : null,
+          },
+          preferredLanguage,
+        ),
+        trace,
+      );
+    }
+
+    const matchedMenuItems = pickMenuSuggestionsForQuery(directLookupQuery, menuItems, context.semanticMatches, 10);
+    if (matchedMenuItems.length > 0) {
+      return replyDecision(
+        buildItemMatchesReply(directLookupQuery, matchedMenuItems, prefersRomanUrdu),
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_options: matchedMenuItems,
+            last_presented_options_at: new Date().toISOString(),
+          },
+          preferredLanguage,
+        ),
+        trace,
+      );
+    }
   }
 
   if (
@@ -1950,6 +2028,35 @@ function isLikelyMenuRequest(text: string): boolean {
   return /(menu|show.*menu|what.*have|list.*items?|kya.*hai|dikhao|category|categories|price|rates?)/.test(text);
 }
 
+function extractStandaloneMenuLookupQuery(rawText: string, normalizedText: string): string | null {
+  if (!normalizedText) return null;
+  if (isGenericMenuPrompt(normalizedText)) return null;
+  if (extractAnyQuantity(normalizedText) != null) return null;
+  if (isExplicitYes(normalizedText) || isExplicitNo(normalizedText)) return null;
+  if (asksOpeningHours(normalizedText) || asksContactDetails(normalizedText) || asksBranchAddress(normalizedText)) {
+    return null;
+  }
+  if (normalizedText.split(/\s+/).length > 8) return null;
+  if (!/[a-z]/.test(normalizedText)) return null;
+
+  const filteredTokens = normalizedText
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2 && !MENU_LOOKUP_FILLER_WORDS.has(token));
+
+  if (filteredTokens.length === 0) return null;
+
+  const candidate = filteredTokens.join(" ").trim();
+  if (candidate.length < 3) return null;
+
+  // If the cleaned query is just logistics text, skip lookup and let regular flow handle it.
+  if (/(delivery|dine in|dinein|address|confirm|status|track|eta|open|hours)/.test(candidate)) return null;
+
+  const compactRaw = normalizeCompact(rawText);
+  if (compactRaw.startsWith("categoryoption") || compactRaw.startsWith("categorymore")) return null;
+  return candidate;
+}
+
 function isSearchLikeDisambiguationMessage(normalizedText: string): boolean {
   if (!normalizedText || normalizedText.length < 3) return false;
   if (extractAnyQuantity(normalizedText) != null) return false;
@@ -2509,15 +2616,12 @@ function buildUnknownItemReplyData(
   romanUrdu: boolean,
   semanticMatches: SemanticMenuMatch[] = [],
 ): { text: string; selectableItems: MenuCatalogItem[] } {
-  const normalizedUnknown = normalizeText(unknown.join(" "));
-  const semanticCandidatePool = semanticMatches.filter((item) => (item.similarity ?? 0) >= 0.62);
-  const lexicalCandidatePool = findLikelyMenuSuggestions(unknown.join(" "), menuItems, 12).filter((item) => { // Increased limit
-    const score = itemSimilarityScore(normalizedUnknown, normalizeText(item.name));
-    return score >= 0.3; // Lowered threshold
-  });
-  const candidatePool = semanticCandidatePool.length > 0 ? semanticCandidatePool : lexicalCandidatePool;
-  const selectableItems = candidatePool
-    .slice(0, 10) // Increased from 6 to 10
+  const unknownQuery = unknown.join(" ").trim();
+  const normalizedUnknown = normalizeText(unknownQuery);
+  const availableMenuItems = menuItems.filter((item) => item.is_available);
+  const semanticCandidatePool = semanticMatches
+    .filter((item) => (item.similarity ?? 0) >= 0.52 && (item.is_available ?? true))
+    .slice(0, 20)
     .map((item) => ({
       id: item.id,
       name: item.name,
@@ -2525,6 +2629,22 @@ function buildUnknownItemReplyData(
       category: item.category ?? null,
       is_available: item.is_available ?? true,
     }));
+  const lexicalCandidatePool = findLikelyMenuSuggestions(unknownQuery, availableMenuItems, 20).filter((item) => {
+    const mergedLabel = normalizeText(`${item.name} ${item.category ?? ""}`);
+    const score = Math.max(itemSimilarityScore(normalizedUnknown, mergedLabel), tokenOverlapScore(normalizedUnknown, mergedLabel));
+    return score >= 0.22;
+  });
+  const fallbackNearestPool =
+    semanticCandidatePool.length === 0 && lexicalCandidatePool.length === 0
+      ? rankNearestMenuAlternatives(unknownQuery, availableMenuItems, 10)
+      : [];
+  const selectableItems = [...semanticCandidatePool, ...lexicalCandidatePool, ...fallbackNearestPool]
+    .slice(0, 20)
+    .reduce<MenuCatalogItem[]>((acc, item) => {
+      if (!acc.some((entry) => entry.id === item.id)) acc.push(item);
+      return acc;
+    }, [])
+    .slice(0, 10);
 
   if (selectableItems.length > 0) {
     const options = selectableItems
@@ -2532,8 +2652,8 @@ function buildUnknownItemReplyData(
       .join("\n");
     return {
       text: romanUrdu
-        ? `Mujhe ye item clear nahi hua: ${unknown.join(", ")}.\nKya in mein se koi chahiye?\n${options}\nNumber bhej dein.`
-        : `I could not confidently match: ${unknown.join(", ")}.\nDid you mean one of these?\n${options}\nReply with a number.`,
+        ? `Mujhe exact item nahi mila: ${unknown.join(", ")}.\nClosest available options ye hain:\n${options}\nNumber bhej dein.`
+        : `I couldn't find an exact match for: ${unknown.join(", ")}.\nHere are the closest available options:\n${options}\nReply with a number.`,
       selectableItems,
     };
   }
@@ -2544,6 +2664,29 @@ function buildUnknownItemReplyData(
       : `Sorry, *${unknown.join(", ")}* does not seem available on the menu right now. Send *menu* to browse categories.`,
     selectableItems: [],
   };
+}
+
+function rankNearestMenuAlternatives(
+  query: string,
+  menuItems: MenuCatalogItem[],
+  limit = 10,
+): MenuCatalogItem[] {
+  const normalizedQuery = normalizeText(query);
+  if (!normalizedQuery || menuItems.length === 0) return [];
+
+  return menuItems
+    .map((item) => {
+      const normalizedCandidate = normalizeText(`${item.name} ${item.category ?? ""}`);
+      const score = Math.max(
+        itemSimilarityScore(normalizedQuery, normalizedCandidate),
+        tokenOverlapScore(normalizedQuery, normalizedCandidate),
+      );
+      return { item, score };
+    })
+    .filter((entry) => entry.score >= 0.08)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, limit)
+    .map((entry) => entry.item);
 }
 
 function isUpsellYes(normalizedText: string): boolean {
@@ -3356,12 +3499,15 @@ function itemSimilarityScore(left: string, right: string): number {
 
 function findLikelyMenuSuggestions(text: string, menuItems: MenuCatalogItem[], limit = 3): MenuCatalogItem[] {
   const normalized = normalizeText(text);
-  const queryTokens = normalized.split(/\s+/).filter(token => token.length > 1);
+  const queryTokens = normalized
+    .split(/\s+/)
+    .filter((token) => token.length > 1 && !MENU_LOOKUP_FILLER_WORDS.has(token));
+  if (queryTokens.length === 0) return [];
 
   // First, find items that contain all the query terms
   const containingItems = menuItems.filter((item) => {
-    const normalizedItem = normalizeText(item.name);
-    return queryTokens.every(token => normalizedItem.includes(token));
+    const normalizedItem = normalizeText(`${item.name} ${item.category ?? ""}`);
+    return queryTokens.every((token) => normalizedItem.includes(token));
   });
 
   if (containingItems.length > 0) {
@@ -3371,25 +3517,27 @@ function findLikelyMenuSuggestions(text: string, menuItems: MenuCatalogItem[], l
 
   // Fallback: find items that contain any of the query terms
   const partialMatches = menuItems.filter((item) => {
-    const normalizedItem = normalizeText(item.name);
-    return queryTokens.some(token => normalizedItem.includes(token) && token.length > 2);
+    const normalizedItem = normalizeText(`${item.name} ${item.category ?? ""}`);
+    return queryTokens.some((token) => normalizedItem.includes(token) && token.length > 2);
   });
 
   if (partialMatches.length > 0) {
     return partialMatches
-      .map(item => ({
+      .map((item) => ({
         item,
-        score: queryTokens.filter(token => normalizeText(item.name).includes(token)).length
+        score: queryTokens.filter((token) =>
+          normalizeText(`${item.name} ${item.category ?? ""}`).includes(token),
+        ).length,
       }))
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
-      .map(entry => entry.item);
+      .map((entry) => entry.item);
   }
 
   // Fallback to similarity scoring
   return menuItems
     .map((item) => {
-      const normalizedItem = normalizeText(item.name);
+      const normalizedItem = normalizeText(`${item.name} ${item.category ?? ""}`);
       return {
         item,
         score: Math.max(
