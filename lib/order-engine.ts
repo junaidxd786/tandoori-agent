@@ -2033,6 +2033,10 @@ function expectsStructuredCheckoutInput(step: WorkflowStep): boolean {
 }
 
 function parseOrderTypeShortcut(normalizedText: string): OrderType | null {
+  if (/\b(price|fee|charges?|cost|kitna|kitne|kya|how much)\b/.test(normalizedText)) {
+    return null;
+  }
+
   if (
     /\b(order_type_delivery|order type delivery|type delivery|home delivery|delivery|deliver)\b/.test(normalizedText) &&
     !/\b(no delivery|without delivery|dont deliver|don't deliver)\b/.test(normalizedText)
@@ -3830,7 +3834,13 @@ function isGroundedItemRequest(rawText: string, requestName: string, semanticMat
   if (compactRaw && compactRequest && compactRaw.includes(compactRequest)) return true;
 
   const requestTokens = normalizedRequest.split(" ").filter((token) => token.length >= 4);
-  if (requestTokens.some((token) => normalizedRaw.includes(token))) return true;
+  const nonGenericRequestTokens = requestTokens.filter((token) => !GENERIC_FOOD_TOKENS.has(token));
+  if (nonGenericRequestTokens.some((token) => normalizedRaw.includes(token))) return true;
+  if (requestTokens.length > 0 && nonGenericRequestTokens.length === 0) {
+    // Query only contains generic tokens like "chicken"; do not auto-ground to a
+    // specific item unless the entire phrase matches (handled above).
+    return false;
+  }
   if (tokenOverlapScore(normalizedRaw, normalizedRequest) >= 0.6) return true;
 
   return semanticMatches.some(
