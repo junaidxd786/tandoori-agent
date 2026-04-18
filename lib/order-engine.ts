@@ -252,9 +252,7 @@ const YES_WORDS = [
   "haan ji",
   "confirm",
   "confirmed",
-  "kar do",
-  "kr do",
-  "place",
+  "place order",
   "done",
 ];
 
@@ -347,6 +345,20 @@ const MENU_LOOKUP_FILLER_WORDS = new Set([
   "would",
   "i",
   "we",
+]);
+const GENERIC_FOOD_TOKENS = new Set([
+  "chicken",
+  "beef",
+  "mutton",
+  "fish",
+  "burger",
+  "pizza",
+  "biryani",
+  "karahi",
+  "bbq",
+  "ice",
+  "cream",
+  "icecream",
 ]);
 
 const ORDER_CANCELLATION_WINDOW_MS = 10 * 60 * 1000;
@@ -2292,6 +2304,22 @@ function hasPhrase(text: string, phrase: string): boolean {
 }
 
 function isExplicitYes(text: string): boolean {
+  // Guard: edit/add/remove instructions should never be interpreted as
+  // checkout confirmation even if they include words like "done" or "kr do".
+  if (
+    /\b(add|remove|delete|without|minus|qty|quantity|change|modify|update|replace|aur|bhi|plus|kam kar|kam kr|kar do|kr do)\b/.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+
+  // For longer texts, require an explicit confirmation phrase.
+  const tokens = text.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length > 3 && !/\b(confirm|confirmed|place order)\b/.test(text)) {
+    return false;
+  }
+
   return YES_WORDS.some((word) => hasPhrase(text, word));
 }
 
@@ -3737,28 +3765,58 @@ function findDisambiguationCandidatesFromRaw(
 
 function findInlineItems(rawText: string, menuItems: MenuCatalogItem[]): Array<{ name: string; qty: number }> {
   const normalized = normalizeText(rawText);
-  const compact = normalizeCompact(rawText);
-  const queryTokenCompacts = tokenizeForMenuMatching(rawText).map((token) => token.replace(/\s+/g, ""));
-  const items: Array<{ name: string; qty: number }> = [];
+  if (!normalized) return [];
 
-  for (const item of menuItems) {
-    const itemName = normalizeText(item.name);
-    if (!itemName) continue;
-    const itemCompact = normalizeCompact(item.name);
-    const overlapScore = tokenOverlapScore(normalized, itemName);
-    const isMatched =
-      normalized.includes(itemName) ||
-      (itemCompact.length >= 5 && compact.includes(itemCompact)) ||
-      queryTokenCompacts.some((token) => token.length >= 4 && itemCompact.includes(token)) ||
-      overlapScore >= 0.66;
-    if (!isMatched) continue;
-    items.push({
-      name: item.name,
-      qty: extractQuantityNearPhrase(normalized, itemName) ?? extractAnyQuantity(normalized) ?? 1,
-    });
-  }
+  const normalizedCompact = normalizeCompact(rawText);
+  const queryTokens = tokenizeForMenuMatching(rawText);
+  const broadQuery =
+    queryTokens.length <= 1 || (queryTokens.length === 2 && queryTokens.every((token) => GENERIC_FOOD_TOKENS.has(token)));
 
-  return items;
+  const ranked = menuItems
+    .map((item) => {
+      const normalizedName = normalizeText(item.name);
+      if (!normalizedName) return null;
+
+      const normalizedComposite = normalizeText(`${item.name} ${item.category ?? ""}`);
+      const itemCompact = normalizeCompact(item.name);
+      const exactScore = normalized === normalizedName ? 1 : 0;
+      const phraseScore = normalized.includes(normalizedName) ? 0.98 : 0;
+      const compactScore =
+        itemCompact.length >= 6 && normalizedCompact.includes(itemCompact)
+          ? 0.9
+          : 0;
+      const score = Math.max(
+        exactScore,
+        phraseScore,
+        compactScore,
+        itemSimilarityScore(normalized, normalizedComposite),
+        tokenOverlapScore(normalized, normalizedComposite),
+      );
+
+      return {
+        item,
+        normalizedName,
+        score,
+      };
+    })
+    .filter((entry): entry is { item: MenuCatalogItem; normalizedName: string; score: number } => Boolean(entry))
+    .filter((entry) => entry.score >= 0.62)
+    .sort((left, right) => right.score - left.score);
+
+  if (ranked.length === 0) return [];
+
+  const best = ranked[0];
+  const second = ranked[1];
+  if (best.score < 0.74) return [];
+  if (broadQuery && best.score < 0.9) return [];
+  if (second && best.score - second.score < 0.08 && best.score < 0.9) return [];
+
+  return [
+    {
+      name: best.item.name,
+      qty: extractQuantityNearPhrase(normalized, best.normalizedName) ?? extractAnyQuantity(normalized) ?? 1,
+    },
+  ];
 }
 
 function isGroundedItemRequest(rawText: string, requestName: string, semanticMatches: SemanticMenuMatch[]): boolean {
