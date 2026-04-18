@@ -889,7 +889,6 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   const directLookupQuery =
-    !expectsStructuredCheckoutInput(state.workflow_step) &&
     interpretation.add_items.length === 0 &&
     interpretation.remove_items.length === 0 &&
     interpretation.intent !== "set_order_type" &&
@@ -948,6 +947,29 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
             {
               workflow_step: "collecting_items",
               last_presented_options: matchedMenuItems,
+              last_presented_options_at: new Date().toISOString(),
+            },
+            preferredLanguage,
+          ),
+          trace,
+        );
+      }
+    }
+
+    if (state.cart.length > 0 && queryHints.length > 0) {
+      const unknownReply = buildUnknownItemReplyData(
+        [queryHints[0]],
+        context.menuItems,
+        prefersRomanUrdu,
+        context.semanticMatches,
+      );
+      if (unknownReply.selectableItems.length > 0) {
+        return replyDecision(
+          unknownReply.text,
+          withPreferredLanguage(
+            {
+              workflow_step: "collecting_items",
+              last_presented_options: unknownReply.selectableItems,
               last_presented_options_at: new Date().toISOString(),
             },
             preferredLanguage,
@@ -1940,9 +1962,13 @@ function isMenuCatalogItemLike(value: unknown): value is MenuCatalogItem {
 }
 
 function normalizeText(value: string): string {
-  return value
+  const withAliasExpansion = value
     .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/\bice[\s-]?cream\b/g, "ice cream");
+  return withAliasExpansion
+    .toLowerCase()
+    .replace(/[-_]+/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1963,10 +1989,15 @@ function tokenOverlapScore(left: string, right: string): number {
   const rightTokens = tokenizeForMenuMatching(right);
   if (leftTokens.length === 0 || rightTokens.length === 0) return 0;
 
-  const rightSet = new Set(rightTokens);
   let overlap = 0;
   for (const token of leftTokens) {
-    if (rightSet.has(token)) overlap += 1;
+    const hasExact = rightTokens.includes(token);
+    const hasNear = rightTokens.some((candidate) => {
+      const minLength = Math.min(token.length, candidate.length);
+      if (minLength < 4) return false;
+      return token.includes(candidate) || candidate.includes(token);
+    });
+    if (hasExact || hasNear) overlap += 1;
   }
 
   return overlap / Math.max(leftTokens.length, rightTokens.length);
@@ -2161,7 +2192,15 @@ function pickMenuSuggestionsForQuery(
       is_available: item.is_available ?? true,
     }));
   const lexicalCandidates = findLikelyMenuSuggestions(query, menuItems, Math.max(limit * 2, 20))
-    .filter((item) => itemSimilarityScore(normalizeText(query), normalizeText(item.name)) >= 0.35);
+    .filter((item) => {
+      const normalizedQuery = normalizeText(query);
+      const normalizedItem = normalizeText(`${item.name} ${item.category ?? ""}`);
+      const score = Math.max(
+        itemSimilarityScore(normalizedQuery, normalizedItem),
+        tokenOverlapScore(normalizedQuery, normalizedItem),
+      );
+      return score >= 0.22;
+    });
   const mergedById = new Map<string, MenuCatalogItem>();
   for (const item of [...semanticCandidates, ...lexicalCandidates]) {
     if (!mergedById.has(item.id)) {
@@ -3683,6 +3722,7 @@ function findDisambiguationCandidatesFromRaw(
 function findInlineItems(rawText: string, menuItems: MenuCatalogItem[]): Array<{ name: string; qty: number }> {
   const normalized = normalizeText(rawText);
   const compact = normalizeCompact(rawText);
+  const queryTokenCompacts = tokenizeForMenuMatching(rawText).map((token) => token.replace(/\s+/g, ""));
   const items: Array<{ name: string; qty: number }> = [];
 
   for (const item of menuItems) {
@@ -3693,6 +3733,7 @@ function findInlineItems(rawText: string, menuItems: MenuCatalogItem[]): Array<{
     const isMatched =
       normalized.includes(itemName) ||
       (itemCompact.length >= 5 && compact.includes(itemCompact)) ||
+      queryTokenCompacts.some((token) => token.length >= 4 && itemCompact.includes(token)) ||
       overlapScore >= 0.66;
     if (!isMatched) continue;
     items.push({
@@ -3760,11 +3801,16 @@ function findLikelyMenuSuggestions(text: string, menuItems: MenuCatalogItem[], l
     .split(/\s+/)
     .filter((token) => token.length > 1 && !MENU_LOOKUP_FILLER_WORDS.has(token));
   if (queryTokens.length === 0) return [];
+  const queryTokenCompacts = queryTokens.map((token) => token.replace(/\s+/g, ""));
 
   // First, find items that contain all the query terms
   const containingItems = menuItems.filter((item) => {
     const normalizedItem = normalizeText(`${item.name} ${item.category ?? ""}`);
-    return queryTokens.every((token) => normalizedItem.includes(token));
+    const normalizedItemCompact = normalizeCompact(`${item.name} ${item.category ?? ""}`);
+    return queryTokens.every((token, index) =>
+      normalizedItem.includes(token) ||
+      (queryTokenCompacts[index].length >= 4 && normalizedItemCompact.includes(queryTokenCompacts[index])),
+    );
   });
 
   if (containingItems.length > 0) {
@@ -3775,15 +3821,19 @@ function findLikelyMenuSuggestions(text: string, menuItems: MenuCatalogItem[], l
   // Fallback: find items that contain any of the query terms
   const partialMatches = menuItems.filter((item) => {
     const normalizedItem = normalizeText(`${item.name} ${item.category ?? ""}`);
-    return queryTokens.some((token) => normalizedItem.includes(token) && token.length > 2);
+    const normalizedItemCompact = normalizeCompact(`${item.name} ${item.category ?? ""}`);
+    return queryTokens.some((token, index) =>
+      (normalizedItem.includes(token) || normalizedItemCompact.includes(queryTokenCompacts[index])) && token.length > 2,
+    );
   });
 
   if (partialMatches.length > 0) {
     return partialMatches
       .map((item) => ({
         item,
-        score: queryTokens.filter((token) =>
-          normalizeText(`${item.name} ${item.category ?? ""}`).includes(token),
+        score: queryTokens.filter((token, index) =>
+          normalizeText(`${item.name} ${item.category ?? ""}`).includes(token) ||
+          normalizeCompact(`${item.name} ${item.category ?? ""}`).includes(queryTokenCompacts[index]),
         ).length,
       }))
       .sort((a, b) => b.score - a.score)
