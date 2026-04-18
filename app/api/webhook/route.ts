@@ -984,9 +984,13 @@ async function drainConversationQueue(conversation: ConversationRow) {
         const optionsFromState = Array.isArray(updatedState.last_presented_options)
           ? updatedState.last_presented_options
           : null;
+        const canAttachPresentedOptions =
+          nextStateSnapshot.workflow_step === "idle" ||
+          nextStateSnapshot.workflow_step === "collecting_items" ||
+          nextStateSnapshot.workflow_step === "awaiting_resume_decision";
         const interactiveList =
           ("interactiveList" in decision ? decision.interactiveList : null) ??
-          (optionsFromState && optionsFromState.length > 0
+          (canAttachPresentedOptions && optionsFromState && optionsFromState.length > 0
             ? buildInteractiveListForPresentedOptions(
               optionsFromState,
               (updatedState.preferred_language ?? state.preferred_language) === "roman_urdu",
