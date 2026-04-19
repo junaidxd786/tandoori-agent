@@ -626,9 +626,19 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   const state = context.state;
   const messageType = detectMessageType(normalizedText);
   const isWorkflowGateStep = expectsStructuredCheckoutInput(state.workflow_step);
+  const hasPendingSelectionContext =
+    state.workflow_step === "collecting_items" &&
+    state.last_presented_category != null &&
+    state.last_presented_category !== "__category_list__" &&
+    Array.isArray(state.last_presented_options) &&
+    state.last_presented_options.length > 0 &&
+    isPresentedOptionsFresh(state);
+  const isConversationStartStep =
+    (state.workflow_step === "idle" || state.workflow_step === "collecting_items") &&
+    !hasPendingSelectionContext;
   const canOfferFreshMenuOnGreeting =
     state.cart.length === 0 &&
-    state.workflow_step === "idle" &&
+    isConversationStartStep &&
     context.menuItems.length > 0;
 
   if (normalizedText.length === 0) {
@@ -641,7 +651,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   // ULTRA-FAST PATTERN-BASED EARLY EXIT FOR SIMPLE GREETINGS - No AI call, no DB queries
-  if (isSimpleGreetingPattern(rawText) && state.cart.length === 0 && state.workflow_step === "idle") {
+  if (isSimpleGreetingPattern(rawText) && state.cart.length === 0 && isConversationStartStep) {
     if (canOfferFreshMenuOnGreeting) {
       const categoryReply = buildCategoryListReply(getAvailableMenuItems(context.menuItems), prefersRomanUrdu, 1);
       const welcome = getGreetingReply(rawText, prefersRomanUrdu);
@@ -678,7 +688,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   // EARLY EXIT FOR DETECTED GREETINGS (fallback to AI-detected greetings)
-  if (messageType === "greeting" && state.cart.length === 0 && state.workflow_step === "idle") {
+  if (messageType === "greeting" && state.cart.length === 0 && isConversationStartStep) {
     if (canOfferFreshMenuOnGreeting) {
       const categoryReply = buildCategoryListReply(getAvailableMenuItems(context.menuItems), prefersRomanUrdu, 1);
       const welcome = getGreetingReply(rawText, prefersRomanUrdu);
@@ -2728,7 +2738,7 @@ function buildLogisticsOrSummaryReply(
   if (
     params.state.order_type == null &&
     params.matchedAdds.matched.length > 0 &&
-    params.state.cart.length >= 2 &&
+    params.state.cart.length >= 1 &&
     !params.state.upsell_offered &&
     Array.isArray(params.menuItems)
   ) {
