@@ -2549,6 +2549,43 @@ function buildOrderTypeInteractiveList(
 function pickUpsellSuggestion(menuItems: MenuCatalogItem[], state: ConversationState): MenuCatalogItem | null {
   const existingNames = new Set(state.cart.map((item) => normalizeText(item.name)));
   const declined = new Set(state.declined_upsells.map((item) => normalizeText(item)));
+  const classifyTags = (name: string, category: string | null) => {
+    const combined = `${normalizeText(name)} ${normalizeText(category ?? "")}`;
+    const isBeverage =
+      /\b(drink|beverage|juice|shake|coffee|tea|cola|soda|mojito|lassi)\b/.test(combined);
+    const isWater = /\b(water|mineral water)\b/.test(combined);
+    const isDessert = /\b(dessert|sweet|ice cream|icecream|kulfi|cake|brownie)\b/.test(combined);
+    const isStarter = /\b(starter|fries|side|salad|soup|appetizer|roll)\b/.test(combined);
+    const isMain =
+      /\b(karahi|handi|biryani|bbq|tikka|boti|chargha|qorma|nihari|chicken|mutton|beef)\b/.test(combined);
+
+    return {
+      isBeverage,
+      isWater,
+      isDessert,
+      isStarter,
+      isMain,
+    };
+  };
+
+  const cartProfile = state.cart.reduce(
+    (acc, item) => {
+      const tags = classifyTags(item.name, item.category);
+      return {
+        hasMain: acc.hasMain || tags.isMain,
+        hasBeverage: acc.hasBeverage || tags.isBeverage,
+        hasDessert: acc.hasDessert || tags.isDessert,
+      };
+    },
+    { hasMain: false, hasBeverage: false, hasDessert: false },
+  );
+
+  const preferenceOrder = cartProfile.hasMain
+    ? ["beverage_non_water", "dessert", "starter", "beverage_water", "other"]
+    : cartProfile.hasBeverage && !cartProfile.hasMain
+      ? ["starter", "dessert", "beverage_non_water", "beverage_water", "other"]
+      : ["beverage_non_water", "dessert", "starter", "beverage_water", "other"];
+
   const candidates = menuItems.filter((item) => {
     if (!item.is_available) return false;
     const normalizedName = normalizeText(item.name);
@@ -2570,29 +2607,35 @@ function pickUpsellSuggestion(menuItems: MenuCatalogItem[], state: ConversationS
 
   if (candidates.length === 0) return null;
 
-  const priorityCategoryWords = [
-    "drink",
-    "beverage",
-    "dessert",
-    "starter",
-    "fries",
-    "side",
-    "salad",
-  ];
+  const ranked = candidates
+    .map((item) => {
+      const tags = classifyTags(item.name, item.category);
+      const bucket = tags.isBeverage
+        ? tags.isWater
+          ? "beverage_water"
+          : "beverage_non_water"
+        : tags.isDessert
+          ? "dessert"
+          : tags.isStarter
+            ? "starter"
+            : "other";
 
-  const prioritized = candidates
-    .filter((item) => {
-      const normalizedCategory = normalizeText(item.category ?? "");
-      return priorityCategoryWords.some((word) => normalizedCategory.includes(word));
+      const bucketRank = preferenceOrder.indexOf(bucket);
+      const safeBucketRank = bucketRank >= 0 ? bucketRank : preferenceOrder.length;
+      return {
+        item,
+        bucket,
+        bucketRank: safeBucketRank,
+      };
     })
-    .sort((left, right) => left.price - right.price);
+    .sort((left, right) => {
+      if (left.bucketRank !== right.bucketRank) {
+        return left.bucketRank - right.bucketRank;
+      }
+      return left.item.price - right.item.price;
+    });
 
-  if (prioritized.length > 0) {
-    return prioritized[0];
-  }
-
-  const sortedByPrice = [...candidates].sort((left, right) => left.price - right.price);
-  return sortedByPrice[0] ?? null;
+  return ranked[0]?.item ?? null;
 }
 
 function handleOrderTypeSelection(

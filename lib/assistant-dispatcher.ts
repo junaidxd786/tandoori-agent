@@ -34,16 +34,17 @@ export async function sendAndPersistAssistantMessage({
   }
 
   if (interactiveList && interactiveList.rows.length > 0) {
-    const interactiveVisibleBody = interactiveList.body?.trim();
-    const interactivePersistedContent =
-      interactiveVisibleBody && interactiveVisibleBody.length > 0 ? interactiveVisibleBody : content;
+    const interactivePayload: WhatsAppInteractiveListPayload = {
+      ...interactiveList,
+      body: buildInteractiveVisibleBody(content, interactiveList.body),
+    };
     try {
       await sendAndPersistOutboundInteractiveMessage({
         conversationId,
         phone,
-        content: interactivePersistedContent,
+        content,
         senderKind: "ai",
-        interactive: interactiveList,
+        interactive: interactivePayload,
       });
       return;
     } catch (error) {
@@ -51,7 +52,7 @@ export async function sendAndPersistAssistantMessage({
         await sendAndPersistOutboundMessage({
           conversationId,
           phone,
-          content: `${content}\n\n${buildInteractiveFallbackText(interactiveList)}`,
+          content: `${content}\n\n${buildInteractiveFallbackText(interactivePayload)}`,
           senderKind: "ai",
         });
         return;
@@ -67,6 +68,21 @@ export async function sendAndPersistAssistantMessage({
     content,
     senderKind: "ai",
   });
+}
+
+function buildInteractiveVisibleBody(content: string, interactiveBody: string): string {
+  const contentText = content.trim();
+  const bodyText = interactiveBody.trim();
+  if (!contentText) return bodyText;
+  if (!bodyText) return contentText;
+
+  const normalizedContent = contentText.toLowerCase();
+  const normalizedBody = bodyText.toLowerCase();
+  if (normalizedContent === normalizedBody || normalizedContent.includes(normalizedBody)) {
+    return contentText;
+  }
+
+  return `${contentText}\n\n${bodyText}`;
 }
 
 function buildInteractiveFallbackText(payload: {
