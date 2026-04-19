@@ -441,7 +441,25 @@ async function processWebhook(body: unknown) {
       const nextLanguage = incomingContent
         ? inferLanguagePreference(incomingContent, state.preferred_language)
         : state.preferred_language;
-      await resetOrderDraftAfterInactivity(conversation.id, conversation.mode, nextLanguage);
+      const inactivityMs = Math.max(
+        0,
+        new Date(createdAt).getTime() - new Date(state.last_processed_user_message_at ?? createdAt).getTime(),
+      );
+      console.info("[webhook] Fresh-start reset after inactivity", {
+        conversationId: conversation.id,
+        mode: conversation.mode,
+        inactivityMinutes: Math.round(inactivityMs / 60_000),
+        previousWorkflow: state.workflow_step,
+        lastProcessedMessageSeq: state.last_processed_message_seq,
+        lastProcessedAt: state.last_processed_user_message_at,
+        incomingAt: createdAt,
+      });
+      await resetOrderDraftAfterInactivity({
+        conversationId: conversation.id,
+        mode: conversation.mode,
+        preferredLanguage: nextLanguage,
+        previousState: state,
+      });
       state = await getOrCreateConversationState(conversation.id);
     }
 
@@ -1009,8 +1027,7 @@ async function drainConversationQueue(conversation: ConversationRow) {
           : null;
         const canAttachPresentedOptions =
           nextStateSnapshot.workflow_step === "idle" ||
-          nextStateSnapshot.workflow_step === "collecting_items" ||
-          nextStateSnapshot.workflow_step === "awaiting_resume_decision";
+          nextStateSnapshot.workflow_step === "collecting_items";
         const interactiveList =
           ("interactiveList" in decision ? decision.interactiveList : null) ??
           (canAttachPresentedOptions && optionsFromState && optionsFromState.length > 0
@@ -1550,14 +1567,21 @@ function shouldStartFreshOrderAfterInactivity(state: ConversationState, incoming
   return incomingAtMs - lastProcessedAtMs >= ORDER_FRESH_START_AFTER_INACTIVITY_MS;
 }
 
-async function resetOrderDraftAfterInactivity(
-  conversationId: string,
-  mode: ConversationRow["mode"],
-  preferredLanguage: ConversationState["preferred_language"],
-) {
+async function resetOrderDraftAfterInactivity(params: {
+  conversationId: string;
+  mode: ConversationRow["mode"];
+  preferredLanguage: ConversationState["preferred_language"];
+  previousState: ConversationState;
+}) {
+  const { conversationId, mode, preferredLanguage, previousState } = params;
   const resetState = {
     ...getDefaultConversationState(conversationId),
     preferred_language: preferredLanguage,
+    // Keep processed-message pointers so old queued user messages are not replayed.
+    last_processed_user_message_id: previousState.last_processed_user_message_id,
+    last_processed_message_seq: previousState.last_processed_message_seq,
+    last_processed_user_message_at: previousState.last_processed_user_message_at,
+    last_user_whatsapp_msg_id: previousState.last_user_whatsapp_msg_id,
   };
 
   const { error: stateError } = await supabaseAdmin

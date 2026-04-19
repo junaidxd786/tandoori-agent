@@ -272,7 +272,6 @@ const YES_WORDS = [
 
 const NO_WORDS = ["no", "nah", "nahi", "nahin", "skip", "cancel", "stop"];
 const RESTART_WORDS = ["restart", "start over", "new order", "fresh order", "naya order", "phir se"];
-const CONTINUE_WORDS = ["continue", "resume", "same order", "carry on"];
 const CANCEL_WORDS = ["cancel order", "stop order", "rehne do", "forget it", "leave it"];
 
 const MENU_LOOKUP_FILLER_WORDS = new Set([
@@ -413,8 +412,6 @@ const ENGLISH_SIGNAL_WORDS = [
   "order",
   "menu",
 ];
-
-const STALE_DRAFT_HOURS = 2;
 
 type QuantityPickerSelection =
   | { kind: "qty"; qty: number }
@@ -692,59 +689,12 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   if (state.workflow_step === "awaiting_resume_decision") {
-    if (containsAny(normalizedText, RESTART_WORDS) || containsAny(normalizedText, CANCEL_WORDS)) {
-      return replyDecision(
-        prefersRomanUrdu
-          ? "Theek hai, purana draft remove kar diya. Naya order bhej dein."
-          : "Sure, I cleared your old draft. Send your new order whenever you're ready.",
-        withPreferredLanguage(resetDraftState(), preferredLanguage),
-      );
-    }
-
-    if (containsAny(normalizedText, CONTINUE_WORDS) || isExplicitYes(normalizedText)) {
-      const resumedStep = getResumeWorkflowStep(state);
-      const resumedState = {
-        ...state,
-        workflow_step: resumedStep,
-        resume_workflow_step: null,
-      };
-      return replyDecision(
-        buildResumePrompt(resumedState, prefersRomanUrdu),
-        withPreferredLanguage(
-          {
-            workflow_step: resumedStep,
-            resume_workflow_step: null,
-          },
-          preferredLanguage,
-        ),
-      );
-    }
-
     return replyDecision(
-      buildStaleDraftPrompt(state, prefersRomanUrdu),
-      withPreferredLanguage(
-        {
-          workflow_step: "awaiting_resume_decision",
-          resume_workflow_step: getResumeWorkflowStep(state),
-        },
-        preferredLanguage,
-      ),
+      prefersRomanUrdu
+        ? "Purana draft expire ho chuka tha, fresh start kar diya hai. Apna item bhej dein."
+        : "The previous draft had expired, so I started fresh. Please send your item.",
+      withPreferredLanguage(resetDraftState(), preferredLanguage),
     );
-  }
-
-  if (shouldPromptForStaleDraftChoice(state)) {
-    if (!containsAny(normalizedText, CONTINUE_WORDS) && !containsAny(normalizedText, RESTART_WORDS) && !isExplicitYes(normalizedText)) {
-      return replyDecision(
-        buildStaleDraftPrompt(state, prefersRomanUrdu),
-        withPreferredLanguage(
-          {
-            workflow_step: "awaiting_resume_decision",
-            resume_workflow_step: state.workflow_step,
-          },
-          preferredLanguage,
-        ),
-      );
-    }
   }
 
   // FAST CHECKOUT SHORTCUTS: avoid NLU call for explicit structured replies.
@@ -961,10 +911,6 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   if (containsAny(normalizedText, RESTART_WORDS)) {
     interpretation.wants_restart = true;
     interpretation.intent = "restart_order";
-  }
-  if (containsAny(normalizedText, CONTINUE_WORDS)) {
-    interpretation.wants_continue = true;
-    interpretation.intent = "continue_order";
   }
   if (containsAny(normalizedText, CANCEL_WORDS)) {
     interpretation.intent = "cancel_order";
@@ -2268,63 +2214,6 @@ function replyDecision(
   };
 }
 
-function shouldPromptForStaleDraftChoice(state: ConversationState): boolean {
-  if (state.workflow_step === "idle" || state.cart.length === 0) return false;
-  if (!state.last_processed_user_message_at) return false;
-
-  const lastActivity = new Date(state.last_processed_user_message_at);
-  const now = new Date();
-  const ageMs = now.getTime() - lastActivity.getTime();
-  return ageMs >= STALE_DRAFT_HOURS * 60 * 60 * 1000;
-}
-
-function getResumeWorkflowStep(state: ConversationState): WorkflowStep {
-  if (state.resume_workflow_step && state.resume_workflow_step !== "awaiting_resume_decision") {
-    return state.resume_workflow_step;
-  }
-
-  if (state.order_type === "delivery" && !state.address) return "awaiting_delivery_address";
-  if (state.order_type === "dine-in" && (!state.guests || !state.reservation_time)) return "awaiting_dine_in_details";
-  if (state.order_type == null) return "awaiting_order_type";
-  if (state.summary_sent_at) return "awaiting_confirmation";
-  return "collecting_items";
-}
-
-function buildResumePrompt(state: ConversationState, romanUrdu: boolean): string {
-  if (state.cart.length === 0) {
-    return romanUrdu
-      ? "Naya order bhej dein, main help kar deta hoon."
-      : "Send your order and I can help right away.";
-  }
-
-  const summary = formatCartItems(state.cart);
-  const hint =
-    state.order_type == null
-      ? romanUrdu
-        ? "Ab order type batayein: Delivery ya Dine-in."
-        : "Please choose order type: Delivery or Dine-in."
-      : state.order_type === "delivery" && !state.address
-        ? romanUrdu
-          ? "Ab apna full delivery address bhej dein."
-          : "Please send your full delivery address."
-        : state.order_type === "dine-in" && (!state.guests || !state.reservation_time)
-          ? romanUrdu
-            ? "Guests aur time bhej dein."
-            : "Please share guest count and time."
-          : romanUrdu
-            ? "Agar ready hain to confirm kar dein."
-            : "If you're ready, confirm the order.";
-
-  return romanUrdu ? `Aap ka draft: ${summary}\n${hint}` : `Your current draft: ${summary}\n${hint}`;
-}
-
-function buildStaleDraftPrompt(state: ConversationState, romanUrdu: boolean): string {
-  const summary = formatCartItems(state.cart);
-  return romanUrdu
-    ? `Aap ka pehle se draft order hai: ${summary}. *continue* ya *restart* likh dein.`
-    : `You already have a draft order: ${summary}. Reply *continue* or *restart*.`;
-}
-
 function resetDraftState(): Partial<ConversationState> {
   return {
     workflow_step: "idle",
@@ -2409,10 +2298,6 @@ function buildOrderTypePrompt(deliveryEnabled: boolean, romanUrdu: boolean): str
   return romanUrdu
     ? "Order type batayein: *Delivery* ya *Dine-in*."
     : "Please choose order type: *Delivery* or *Dine-in*.";
-}
-
-function formatCartItems(cart: DraftCartItem[]): string {
-  return cart.map((item) => `${formatDraftItemLabel(item)} x${item.qty}`).join(", ");
 }
 
 function buildAddedItemsMessage(items: DraftCartItem[]): string {

@@ -48,7 +48,6 @@ const BLOCKING_WORKFLOW_STEPS = new Set([
   "awaiting_delivery_address",
   "awaiting_dine_in_details",
   "awaiting_confirmation",
-  "awaiting_resume_decision",
 ]);
 
 function isSemanticCandidateSnapshot(value: unknown): value is SemanticCandidateSnapshot {
@@ -152,7 +151,7 @@ export function deriveSessionNode(
   ) {
     return "checkout";
   }
-  if (state.workflow_step === "awaiting_confirmation" || state.workflow_step === "awaiting_resume_decision") {
+  if (state.workflow_step === "awaiting_confirmation") {
     return "order_review";
   }
   if (state.workflow_step === "idle" || state.workflow_step === "collecting_items" || state.workflow_step === "awaiting_upsell_reply") {

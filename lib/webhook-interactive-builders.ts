@@ -138,8 +138,7 @@ function inferFlowContext(workflowStep: ConversationState["workflow_step"]): Wha
 
   if (
     workflowStep === "idle" ||
-    workflowStep === "collecting_items" ||
-    workflowStep === "awaiting_resume_decision"
+    workflowStep === "collecting_items"
   ) {
     return "menu";
   }
