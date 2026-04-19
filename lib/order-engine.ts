@@ -328,6 +328,9 @@ const QUANTITY_PICKER_CATEGORY_HINTS = [
   "beverage",
   "drink",
   "cold beverage",
+  "rice",
+  "biryani",
+  "noodle",
   "ice cream",
   "icecream",
   "soup",
@@ -343,6 +346,11 @@ const QUANTITY_PICKER_NAME_HINTS = [
   "ice cream",
   "icecream",
   "kulfi",
+  "biryani",
+  "pulao",
+  "rice",
+  "chowmein",
+  "fried rice",
   "coffee",
   "cola",
   "juice",
@@ -1495,6 +1503,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     rawText,
     context.semanticMatches,
   );
+  matchedAdds.unknown = matchedAdds.unknown.filter((entry) => !isControlPayloadToken(entry));
   const removeRequests = resolveRemovalRequests(interpretation, state.cart, rawText);
   const qtyUpdates = resolveQuantityUpdates(rawText, state.cart);
   if (qtyUpdates.length > 0 && isLikelyQuantityOnlyInstruction(normalizedText)) {
@@ -1577,9 +1586,11 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   }
 
   let pendingQuantitySelection: MenuCatalogItem | null = null;
+  let selectedFromPresentedOptions = false;
   if (state.last_presented_options && state.last_presented_options.length > 0 && isPresentedOptionsFresh(state)) {
     const directSelection = findPresentedOptionByDirectValue(rawText, state.last_presented_options);
     if (directSelection) {
+      selectedFromPresentedOptions = true;
       if (shouldPromptForQuantityPicker(directSelection)) {
         pendingQuantitySelection = directSelection;
       } else {
@@ -1598,6 +1609,7 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     const selection = parseSelectionWithQty(rawText, state.last_presented_options.length);
     if (selection) {
       const selected = state.last_presented_options[selection.optionIndex];
+      selectedFromPresentedOptions = true;
       if (selection.qty === 1 && shouldPromptForQuantityPicker(selected)) {
         pendingQuantitySelection = selected;
       } else {
@@ -1612,6 +1624,11 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
         });
       }
     }
+  }
+
+  if (selectedFromPresentedOptions) {
+    const normalizedRaw = normalizeText(rawText);
+    matchedAdds.unknown = matchedAdds.unknown.filter((entry) => normalizeText(entry) !== normalizedRaw);
   }
 
   if (
@@ -3763,6 +3780,16 @@ function isLikelySelectionCommand(normalizedText: string): boolean {
   if (/^category[_\s-]?option[_\s-]?\d{1,2}$/i.test(normalizedText)) return true;
 
   return false;
+}
+
+function isControlPayloadToken(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (isUuidLike(trimmed)) return true;
+
+  return /^(?:category[_\s-]?(?:option|more)[_\s-]?\d{1,2}|city[_\s-]?option[_\s-]?\d{1,2}|branch[_\s-]?option[_\s-]?\d{1,2}|order[_\s-]?type[_\s-]?(?:delivery|dine[_\s-]?in)|upsell[_\s-]?(?:yes|no)|qty[_\s-]?(?:option|pick)[_\s-]?\d{1,2}|qty[_\s-]?custom|__qty_pick__:(?:\d{1,2}|custom))$/i.test(
+    trimmed,
+  );
 }
 
 function parseSelectionWithQty(
