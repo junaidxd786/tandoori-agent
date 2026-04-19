@@ -884,9 +884,18 @@ async function drainConversationQueue(conversation: ConversationRow) {
       const normalizedIncoming = nextMessage.content.toLowerCase().trim();
       const messageType = detectMessageType(normalizedIncoming);
       const hasDirectMenuSignal = /(menu|show.*menu|list.*items?|category|categories|price|rates?|kya.*hai|dikhao)/.test(normalizedIncoming);
+      const shouldPrimeMenuOnGreeting =
+        messageType === "greeting" &&
+        state.workflow_step === "idle" &&
+        Array.isArray(state.cart) &&
+        state.cart.length === 0;
 
       // Load menu when direct menu signals exist, even if mixed with greetings like "hi menu".
-      const needsFullProcessing = messageType === "complex" || messageType === "menu_related" || hasDirectMenuSignal;
+      const needsFullProcessing =
+        messageType === "complex" ||
+        messageType === "menu_related" ||
+        hasDirectMenuSignal ||
+        shouldPrimeMenuOnGreeting;
       if (needsFullProcessing && (!cachedMenuItems || Date.now() - menuLoadedAt > 5 * 60_000)) {
         cachedMenuItems = await getMenuCatalog(conversation.branch_id);
         menuLoadedAt = Date.now();

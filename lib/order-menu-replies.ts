@@ -9,6 +9,28 @@ type MenuCatalogItemLike = {
   is_available: boolean;
 };
 
+const CATEGORY_INTENT_ALIAS_RULES: Array<{
+  queryTokens: string[];
+  categoryHints: string[];
+}> = [
+  {
+    queryTokens: ["drink", "drinks", "beverage", "beverages", "cold drink", "soft drink", "juice", "shake", "shakes"],
+    categoryHints: ["beverage", "drink", "cold beverage", "hot beverage", "juice", "shake"],
+  },
+  {
+    queryTokens: ["dessert", "desserts", "sweet", "sweets", "meetha", "ice cream", "icecream", "kulfi"],
+    categoryHints: ["dessert", "sweet", "ice cream", "icecream", "kulfi"],
+  },
+  {
+    queryTokens: ["bbq", "barbecue", "grill", "tikka", "boti", "kabab", "kebab", "chargha"],
+    categoryHints: ["bbq", "barbecue", "grill", "tikka", "boti", "kabab", "kebab", "chargha"],
+  },
+  {
+    queryTokens: ["biryani", "rice", "pulao"],
+    categoryHints: ["biryani", "rice", "pulao"],
+  },
+];
+
 export function findCategoryRequest(text: string, menuItems: MenuCatalogItemLike[]): string | null {
   const raw = text.trim();
   const normalized = normalizeText(raw);
@@ -33,6 +55,26 @@ export function findCategoryRequest(text: string, menuItems: MenuCatalogItemLike
   for (const category of categories) {
     const normCategory = normalizeText(category);
     if (normCategory && normalized.includes(normCategory)) return category;
+  }
+
+  for (const rule of CATEGORY_INTENT_ALIAS_RULES) {
+    const hasIntentToken = rule.queryTokens.some((token) => normalized.includes(normalizeText(token)));
+    if (!hasIntentToken) continue;
+
+    const rankedCandidates = categories
+      .map((category, index) => {
+        const normalizedCategory = normalizeText(category);
+        const score = rule.categoryHints.reduce((total, hint) => {
+          return normalizedCategory.includes(normalizeText(hint)) ? total + 1 : total;
+        }, 0);
+        return { category, index, score };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score || left.index - right.index);
+
+    if (rankedCandidates.length > 0) {
+      return rankedCandidates[0].category;
+    }
   }
 
   const fuzzyCategory = categories

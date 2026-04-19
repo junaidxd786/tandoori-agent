@@ -626,6 +626,10 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
   const state = context.state;
   const messageType = detectMessageType(normalizedText);
   const isWorkflowGateStep = expectsStructuredCheckoutInput(state.workflow_step);
+  const canOfferFreshMenuOnGreeting =
+    state.cart.length === 0 &&
+    state.workflow_step === "idle" &&
+    context.menuItems.length > 0;
 
   if (normalizedText.length === 0) {
     return replyDecision(
@@ -638,6 +642,25 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
 
   // ULTRA-FAST PATTERN-BASED EARLY EXIT FOR SIMPLE GREETINGS - No AI call, no DB queries
   if (isSimpleGreetingPattern(rawText) && state.cart.length === 0 && state.workflow_step === "idle") {
+    if (canOfferFreshMenuOnGreeting) {
+      const categoryReply = buildCategoryListReply(getAvailableMenuItems(context.menuItems), prefersRomanUrdu, 1);
+      const welcome = getGreetingReply(rawText, prefersRomanUrdu);
+      return replyDecision(
+        `${welcome}\n\n${categoryReply.text}`,
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_category: "__category_list__",
+            last_presented_options: null,
+            last_presented_options_at: null,
+          },
+          preferredLanguage,
+        ),
+        undefined,
+        categoryReply.interactiveList,
+      );
+    }
+
     return replyDecision(
       getGreetingReply(rawText, prefersRomanUrdu),
       withPreferredLanguage({}, preferredLanguage),
@@ -656,6 +679,25 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
 
   // EARLY EXIT FOR DETECTED GREETINGS (fallback to AI-detected greetings)
   if (messageType === "greeting" && state.cart.length === 0 && state.workflow_step === "idle") {
+    if (canOfferFreshMenuOnGreeting) {
+      const categoryReply = buildCategoryListReply(getAvailableMenuItems(context.menuItems), prefersRomanUrdu, 1);
+      const welcome = getGreetingReply(rawText, prefersRomanUrdu);
+      return replyDecision(
+        `${welcome}\n\n${categoryReply.text}`,
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_category: "__category_list__",
+            last_presented_options: null,
+            last_presented_options_at: null,
+          },
+          preferredLanguage,
+        ),
+        undefined,
+        categoryReply.interactiveList,
+      );
+    }
+
     return replyDecision(
       getGreetingReply(rawText, prefersRomanUrdu),
       withPreferredLanguage({}, preferredLanguage),
