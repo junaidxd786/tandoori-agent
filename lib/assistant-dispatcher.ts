@@ -76,13 +76,22 @@ function buildInteractiveVisibleBody(content: string, interactiveBody: string): 
   if (!contentText) return bodyText;
   if (!bodyText) return contentText;
 
-  const normalizedContent = contentText.toLowerCase();
-  const normalizedBody = bodyText.toLowerCase();
+  const normalizedContent = normalizeForDedup(contentText);
+  const normalizedBody = normalizeForDedup(bodyText);
   if (normalizedContent === normalizedBody || normalizedContent.includes(normalizedBody)) {
     return contentText;
   }
 
   return `${contentText}\n\n${bodyText}`;
+}
+
+function normalizeForDedup(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[*_`~]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function buildInteractiveFallbackText(payload: {

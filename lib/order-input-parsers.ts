@@ -112,6 +112,16 @@ export function extractQuantityNearPhrase(text: string, phrase: string): number 
 export function parseAddress(raw: string): string | null {
   const compact = raw.trim().replace(/\s+/g, " ");
   if (!compact || compact.length < 8) return null;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(compact)) {
+    return null;
+  }
+  if (
+    /^(?:category[_\s-]?(?:option|more)[_\s-]?\d{1,2}|city[_\s-]?option[_\s-]?\d{1,2}|branch[_\s-]?option[_\s-]?\d{1,2}|order[_\s-]?type[_\s-]?(?:delivery|dine[_\s-]?in)|upsell[_\s-]?(?:yes|no)|qty[_\s-]?(?:option|pick)[_\s-]?\d{1,2}|qty[_\s-]?custom|__qty_pick__:(?:\d{1,2}|custom))$/i.test(
+      compact,
+    )
+  ) {
+    return null;
+  }
   const normalized = normalizeText(compact);
   const hasHint = ADDRESS_HINTS.some((hint) => normalized.includes(hint));
   const hasNumber = /\d/.test(compact);
