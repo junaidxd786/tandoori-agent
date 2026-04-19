@@ -53,6 +53,7 @@ const FLOW_CONTEXT_PREFIX: Record<WhatsAppFlowContext, string> = {
 const FLOW_DATA_MENU_LIMIT = 40;
 const FLOW_DATA_BRANCH_LIMIT = 10;
 const FLOW_DATA_CART_LIMIT = 30;
+const FLOW_RESPONSE_MAX_ITEM_REQUESTS = 12;
 
 type FlowResolvedConfig = {
   flowId?: string;
@@ -104,9 +105,8 @@ export function extractFlowResponseCommand(responseJsonRaw: string): string | nu
 
   const selectedBranch = pickString(payload, [
     "selected_branch_id",
-    "branch_id",
     "selected_branch",
-    "branch",
+    "selected_branch_slug",
   ]);
   if (selectedBranch) {
     chunks.push(selectedBranch);
@@ -313,10 +313,12 @@ function pickBoolean(source: Record<string, unknown>, keys: string[]): boolean {
 }
 
 function pickItemRequests(source: Record<string, unknown>): Array<{ label: string; qty: number }> {
-  const candidateKeys = ["items", "cart_items", "order_items", "selected_items"];
+  const candidateKeys = ["selected_items", "items", "order_items"];
   for (const key of candidateKeys) {
     const value = source[key];
     if (!Array.isArray(value)) continue;
+    if (value.length === 0) continue;
+    if (value.length > FLOW_RESPONSE_MAX_ITEM_REQUESTS) continue;
 
     const parsed = value
       .map((entry) => {
@@ -336,7 +338,8 @@ function pickItemRequests(source: Record<string, unknown>): Array<{ label: strin
           qty: Math.max(1, Math.floor(qty)),
         };
       })
-      .filter((entry): entry is { label: string; qty: number } => Boolean(entry?.label));
+      .filter((entry): entry is { label: string; qty: number } => Boolean(entry?.label))
+      .slice(0, FLOW_RESPONSE_MAX_ITEM_REQUESTS);
 
     if (parsed.length > 0) return parsed;
   }

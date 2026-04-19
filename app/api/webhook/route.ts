@@ -523,6 +523,47 @@ async function processWebhook(body: unknown) {
     }
 
     if (conversation.mode === "human") {
+      if (incomingContent && shouldResumeBotFromHumanMessage(incomingContent)) {
+        const resumeReply =
+          state.preferred_language === "roman_urdu"
+            ? "Theek hai, AI assistant dobara active kar diya gaya hai. Aap apna order message bhej dein."
+            : "Done, the AI assistant is active again. You can send your order now.";
+
+        await resumeBotForConversation(conversation.id);
+        await supabaseAdmin
+          .from("conversations")
+          .update({
+            mode: "agent",
+            has_unread: false,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", conversation.id);
+
+        await sendAndPersistAssistantMessage({
+          conversationId: conversation.id,
+          phone: message.from,
+          content: resumeReply,
+        });
+
+        await markMessageProcessed(state, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
+        await getOrCreateUserSession(conversation.id, {
+          active_node: "cart_builder",
+          status: "active",
+          is_bot_active: true,
+        });
+        await updateUserSession(conversation.id, {
+          active_node: "cart_builder",
+          return_node: null,
+          status: "active",
+          is_bot_active: true,
+          escalation_reason: null,
+          escalated_at: null,
+          last_user_message: content,
+          last_assistant_reply: resumeReply,
+        });
+        continue;
+      }
+
       await markMessageProcessed(state, message.id, createdAt, persistedMessage.message?.ingest_seq ?? null);
       const humanSession = await getOrCreateUserSession(conversation.id, {
         active_node: "human_handoff",
@@ -807,27 +848,6 @@ async function drainConversationQueue(conversation: ConversationRow) {
         state.last_processed_message_seq,
       );
       if (!nextMessage) break;
-
-      // Check if we should resume bot mode from human handoff
-      if (conversation.mode === "human" && shouldResumeBotFromHumanMessage(nextMessage.content)) {
-        await resumeBotForConversation(conversation.id);
-        await supabaseAdmin
-          .from("conversations")
-          .update({
-            mode: "bot",
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", conversation.id);
-        // Skip processing this message as it's a control command
-        await updateConversationState(state, {
-          last_processed_user_message_id: nextMessage.whatsapp_msg_id,
-          last_processed_message_seq: nextMessage.ingest_seq,
-          last_processed_user_message_at: nextMessage.created_at,
-          last_user_whatsapp_msg_id: nextMessage.whatsapp_msg_id,
-          last_error: null,
-        });
-        continue;
-      }
 
       if (isStaleMessage(nextMessage, state)) {
         await updateConversationState(state, {
@@ -1128,8 +1148,14 @@ async function drainConversationQueue(conversation: ConversationRow) {
 
         const replyLanguage =
           (updatedState.preferred_language ?? state.preferred_language) === "roman_urdu" ? "roman_urdu" : "english";
-        const fallback =
-          replyLanguage === "roman_urdu"
+        const missingMenuItem = /Menu item no longer exists:\s*(.+)$/i.exec(
+          error instanceof Error ? error.message : "",
+        );
+        const fallback = missingMenuItem
+          ? replyLanguage === "roman_urdu"
+            ? `Maazrat, *${missingMenuItem[1]}* ab menu mein available nahi hai. Kisi aur item ka naam bhej dein ya *menu* likh dein.`
+            : `Sorry, *${missingMenuItem[1]}* is no longer available right now. Please send another item name or type *menu*.`
+          : replyLanguage === "roman_urdu"
             ? "Maazrat, system is waqt thora busy hai. Thori dair mein dubara message bhej dein ya urgent help ke liye call karein."
             : "I'm sorry, the system is a little busy right now. Please send your message again in a moment or call us for urgent help.";
         try {

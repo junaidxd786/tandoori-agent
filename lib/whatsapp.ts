@@ -40,6 +40,7 @@ const STATUS_MESSAGES: Record<string, string> = {
   delivered: `Your order has been delivered. Thank you for choosing ${process.env.NEXT_PUBLIC_APP_NAME || "us"}.`,
   cancelled: `Your order has been cancelled. For help, please call ${process.env.NEXT_PUBLIC_APP_PHONE_DELIVERY || "our support line"}.`,
 };
+const WHATSAPP_REQUEST_TIMEOUT_MS = Number(process.env.WHATSAPP_REQUEST_TIMEOUT_MS) || 15_000;
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -47,6 +48,16 @@ async function sleep(ms: number): Promise<void> {
 
 function isRetriableStatus(status: number): boolean {
   return status === 408 || status === 409 || status === 429 || status >= 500;
+}
+
+async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs = WHATSAPP_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function sendWhatsAppMessage(to: string, body: string): Promise<WhatsAppSendResult> {
@@ -61,7 +72,7 @@ export async function sendWhatsAppMessage(to: string, body: string): Promise<Wha
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const response = await fetch(`https://graph.facebook.com/v22.0/${phoneId}/messages`, {
+      const response = await fetchWithTimeout(`https://graph.facebook.com/v22.0/${phoneId}/messages`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -145,7 +156,7 @@ export async function sendWhatsAppInteractiveList(
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const response = await fetch(`https://graph.facebook.com/v22.0/${phoneId}/messages`, {
+      const response = await fetchWithTimeout(`https://graph.facebook.com/v22.0/${phoneId}/messages`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -253,7 +264,7 @@ export async function sendWhatsAppInteractiveFlow(
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const response = await fetch(`https://graph.facebook.com/v22.0/${phoneId}/messages`, {
+      const response = await fetchWithTimeout(`https://graph.facebook.com/v22.0/${phoneId}/messages`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,

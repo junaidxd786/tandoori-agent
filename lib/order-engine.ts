@@ -323,6 +323,50 @@ const GENERIC_FOOD_TOKENS = new Set([
 ]);
 
 const ORDER_CANCELLATION_WINDOW_MS = 10 * 60 * 1000;
+const QUANTITY_PICK_PREFIX = "__qty_pick__:";
+const QUANTITY_PICKER_CATEGORY_HINTS = [
+  "dessert",
+  "beverage",
+  "drink",
+  "cold beverage",
+  "ice cream",
+  "icecream",
+  "soup",
+  "salad",
+  "fries",
+  "starter",
+  "appetizer",
+  "sandwich",
+  "burger",
+  "roll",
+];
+const QUANTITY_PICKER_NAME_HINTS = [
+  "ice cream",
+  "icecream",
+  "kulfi",
+  "coffee",
+  "cola",
+  "juice",
+  "water",
+  "soup",
+  "fries",
+  "burger",
+  "sandwich",
+  "roll",
+  "shake",
+];
+const QUANTITY_SKIP_NAME_HINTS = [
+  "karahi",
+  "handi",
+  "tikka",
+  "boti",
+  "chargha",
+  "roast",
+  "bbq",
+  "full",
+  "half",
+];
+const QUANTITY_PICKER_OPTION_COUNT = 5;
 const SIZE_WORDS = new Map<string, string>([
   ["small", "Small"],
   ["sm", "Small"],
@@ -370,7 +414,12 @@ const ENGLISH_SIGNAL_WORDS = [
   "menu",
 ];
 
-const STALE_DRAFT_HOURS = 4;
+const STALE_DRAFT_HOURS = 2;
+
+type QuantityPickerSelection =
+  | { kind: "qty"; qty: number }
+  | { kind: "custom" }
+  | null;
 
 export function getDefaultConversationState(conversationId: string): ConversationState {
   return {
@@ -417,6 +466,145 @@ export function parseConversationState(raw: Partial<ConversationState> & { conve
     last_presented_options_at: typeof raw.last_presented_options_at === "string" ? raw.last_presented_options_at : null,
     customer_instructions: typeof raw.customer_instructions === "string" ? raw.customer_instructions : null,
   };
+}
+
+function isQuantityPickerState(state: ConversationState): boolean {
+  return (
+    typeof state.last_presented_category === "string" &&
+    state.last_presented_category.startsWith(QUANTITY_PICK_PREFIX) &&
+    Array.isArray(state.last_presented_options) &&
+    state.last_presented_options.length === 1
+  );
+}
+
+function getPendingQuantityPickerItem(state: ConversationState): MenuCatalogItem | null {
+  if (!isQuantityPickerState(state)) return null;
+
+  const selected = state.last_presented_options?.[0] ?? null;
+  if (!selected) return null;
+
+  const expectedId = state.last_presented_category!.slice(QUANTITY_PICK_PREFIX.length);
+  if (!expectedId || expectedId === selected.id) return selected;
+  return null;
+}
+
+function shouldPromptForQuantityPicker(item: MenuCatalogItem): boolean {
+  const normalizedName = normalizeText(item.name);
+  const normalizedCategory = normalizeText(item.category ?? "");
+
+  if (!normalizedName) return false;
+
+  if (QUANTITY_SKIP_NAME_HINTS.some((hint) => normalizedName.includes(normalizeText(hint)))) {
+    return false;
+  }
+
+  if (QUANTITY_PICKER_NAME_HINTS.some((hint) => normalizedName.includes(normalizeText(hint)))) {
+    return true;
+  }
+
+  if (!normalizedCategory) return false;
+  return QUANTITY_PICKER_CATEGORY_HINTS.some((hint) => normalizedCategory.includes(normalizeText(hint)));
+}
+
+function buildQuantityPickerInteractiveList(item: MenuCatalogItem, romanUrdu: boolean): {
+  body: string;
+  buttonText: string;
+  sectionTitle?: string;
+  rows: Array<{ id: string; title: string; description?: string }>;
+} {
+  const rows = Array.from({ length: QUANTITY_PICKER_OPTION_COUNT }, (_, index) => {
+    const qty = index + 1;
+    return {
+      id: `${QUANTITY_PICK_PREFIX}${qty}`,
+      title: `${qty}`,
+      description: `Rs. ${item.price * qty}`,
+    };
+  });
+
+  rows.push({
+    id: `${QUANTITY_PICK_PREFIX}custom`,
+    title: romanUrdu ? "Custom quantity" : "Custom quantity",
+    description: romanUrdu ? "Khud number type karein" : "Type any number",
+  });
+
+  return {
+    body: romanUrdu ? `${item.name} ki quantity select karein.` : `Select quantity for ${item.name}.`,
+    buttonText: romanUrdu ? "Quantity" : "Quantity",
+    sectionTitle: romanUrdu ? "Quantity" : "Quantity",
+    rows,
+  };
+}
+
+function buildQuantityPickerReply(item: MenuCatalogItem, romanUrdu: boolean): {
+  text: string;
+  interactiveList: {
+    body: string;
+    buttonText: string;
+    sectionTitle?: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  };
+} {
+  return {
+    text: romanUrdu
+      ? `*${item.name}* select ho gaya. Kitni quantity chahiye?`
+      : `*${item.name}* selected. How many would you like?`,
+    interactiveList: buildQuantityPickerInteractiveList(item, romanUrdu),
+  };
+}
+
+function parseQuantityPickerSelection(rawText: string): QuantityPickerSelection {
+  const trimmed = rawText.trim();
+  if (!trimmed) return null;
+
+  const prefixed = trimmed.match(/^__qty_pick__:(\d{1,2}|custom)$/i);
+  if (prefixed) {
+    if (prefixed[1].toLowerCase() === "custom") return { kind: "custom" };
+    return { kind: "qty", qty: clampQty(Number.parseInt(prefixed[1], 10)) };
+  }
+
+  const optionFormat = trimmed.match(/^qty[_\s-]?(?:option|pick)[_\s-]?(\d{1,2})$/i);
+  if (optionFormat) {
+    return { kind: "qty", qty: clampQty(Number.parseInt(optionFormat[1], 10)) };
+  }
+
+  if (/^(?:qty[_\s-]?custom|custom\s*qty|quantity\s*custom|custom)$/i.test(trimmed)) {
+    return { kind: "custom" };
+  }
+
+  const normalized = normalizeText(trimmed);
+  const wordQuantities: Record<string, number> = {
+    one: 1,
+    aik: 1,
+    ek: 1,
+    two: 2,
+    do: 2,
+    three: 3,
+    teen: 3,
+    four: 4,
+    char: 4,
+    five: 5,
+    paanch: 5,
+  };
+  if (wordQuantities[normalized] != null) {
+    return { kind: "qty", qty: wordQuantities[normalized] };
+  }
+
+  const qtyMatch = normalized.match(/^(?:qty|quantity)?\s*(\d{1,2})\s*(?:x|times|pcs?|pieces?|kar do|kr do|kar dain|kr dain)?$/i);
+  if (qtyMatch) {
+    return { kind: "qty", qty: clampQty(Number.parseInt(qtyMatch[1], 10)) };
+  }
+
+  return null;
+}
+
+function isQuantityPickerControlInput(rawText: string): boolean {
+  const trimmed = rawText.trim();
+  if (!trimmed) return false;
+  if (/^__qty_pick__:/i.test(trimmed)) return true;
+  if (/^qty[_\s-]?(?:option|pick|custom)/i.test(trimmed)) return true;
+  if (/^(?:custom\s*qty|quantity\s*custom)$/i.test(trimmed)) return true;
+  if (/^\d{1,2}$/.test(trimmed)) return true;
+  return false;
 }
 
 export function inferLanguagePreference(
@@ -629,6 +817,109 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
           sentiment: "neutral",
           notes: null,
         },
+      );
+    }
+  }
+
+  const pendingQtyItem = getPendingQuantityPickerItem(state);
+  if (pendingQtyItem) {
+    if (!isPresentedOptionsFresh(state)) {
+      return replyDecision(
+        prefersRomanUrdu
+          ? "Quantity selection expire ho gayi. Item dubara select karein."
+          : "That quantity selection expired. Please select the item again.",
+        withPreferredLanguage(
+          {
+            last_presented_category: null,
+            last_presented_options: null,
+            last_presented_options_at: null,
+          },
+          preferredLanguage,
+        ),
+      );
+    }
+
+    const quantitySelection = parseQuantityPickerSelection(rawText);
+    if (quantitySelection?.kind === "custom") {
+      const quantityPrompt = buildQuantityPickerReply(pendingQtyItem, prefersRomanUrdu);
+      return replyDecision(
+        prefersRomanUrdu
+          ? "Please quantity number bhej dein (1 se 50 tak)."
+          : "Please send a quantity number (1 to 50).",
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_category: `${QUANTITY_PICK_PREFIX}${pendingQtyItem.id}`,
+            last_presented_options: [pendingQtyItem],
+            last_presented_options_at: new Date().toISOString(),
+          },
+          preferredLanguage,
+        ),
+        undefined,
+        quantityPrompt.interactiveList,
+      );
+    }
+
+    if (quantitySelection?.kind === "qty") {
+      const selectedItem: DraftCartItem = {
+        name: pendingQtyItem.name,
+        qty: clampQty(quantitySelection.qty),
+        price: pendingQtyItem.price,
+        category: pendingQtyItem.category,
+        size: null,
+        addons: [],
+        item_instructions: null,
+      };
+
+      const nextState: ConversationState = {
+        ...state,
+        cart: mergeCartItems(state.cart, [selectedItem]),
+        workflow_step: "collecting_items",
+        preferred_language: preferredLanguage,
+        last_presented_category: null,
+        last_presented_options: null,
+        last_presented_options_at: null,
+      };
+
+      return buildLogisticsOrSummaryReply(
+        {
+          state: nextState,
+          settings: context.settings,
+          matchedAdds: {
+            matched: [selectedItem],
+            unknown: [],
+            ambiguous: [],
+          },
+          removedItemsText: "",
+          menuItems: context.menuItems,
+        },
+        {
+          intent: "set_item_quantity",
+          confidence: 0.99,
+          unknownItems: [],
+          sentiment: "neutral",
+          notes: null,
+        },
+      );
+    }
+
+    if (isQuantityPickerControlInput(rawText)) {
+      const quantityPrompt = buildQuantityPickerReply(pendingQtyItem, prefersRomanUrdu);
+      return replyDecision(
+        prefersRomanUrdu
+          ? "Quantity samajh nahi aayi. 1 se 50 tak number bhej dein."
+          : "I couldn't read that quantity. Send a number from 1 to 50.",
+        withPreferredLanguage(
+          {
+            workflow_step: "collecting_items",
+            last_presented_category: `${QUANTITY_PICK_PREFIX}${pendingQtyItem.id}`,
+            last_presented_options: [pendingQtyItem],
+            last_presented_options_at: new Date().toISOString(),
+          },
+          preferredLanguage,
+        ),
+        undefined,
+        quantityPrompt.interactiveList,
       );
     }
   }
@@ -1287,33 +1578,65 @@ export async function decideTurn(context: TurnContext): Promise<TurnDecision> {
     );
   }
 
+  let pendingQuantitySelection: MenuCatalogItem | null = null;
   if (state.last_presented_options && state.last_presented_options.length > 0 && isPresentedOptionsFresh(state)) {
     const directSelection = findPresentedOptionByDirectValue(rawText, state.last_presented_options);
     if (directSelection) {
-      matchedAdds.matched.push({
-        name: directSelection.name,
-        qty: 1,
-        price: directSelection.price,
-        category: directSelection.category,
-        size: null,
-        addons: [],
-        item_instructions: null,
-      });
+      if (shouldPromptForQuantityPicker(directSelection)) {
+        pendingQuantitySelection = directSelection;
+      } else {
+        matchedAdds.matched.push({
+          name: directSelection.name,
+          qty: 1,
+          price: directSelection.price,
+          category: directSelection.category,
+          size: null,
+          addons: [],
+          item_instructions: null,
+        });
+      }
     }
 
     const selection = parseSelectionWithQty(rawText, state.last_presented_options.length);
     if (selection) {
       const selected = state.last_presented_options[selection.optionIndex];
-      matchedAdds.matched.push({
-        name: selected.name,
-        qty: selection.qty,
-        price: selected.price,
-        category: selected.category,
-        size: null,
-        addons: [],
-        item_instructions: null,
-      });
+      if (selection.qty === 1 && shouldPromptForQuantityPicker(selected)) {
+        pendingQuantitySelection = selected;
+      } else {
+        matchedAdds.matched.push({
+          name: selected.name,
+          qty: selection.qty,
+          price: selected.price,
+          category: selected.category,
+          size: null,
+          addons: [],
+          item_instructions: null,
+        });
+      }
     }
+  }
+
+  if (
+    pendingQuantitySelection &&
+    matchedAdds.matched.length === 0 &&
+    removeRequests.length === 0 &&
+    qtyUpdates.length === 0
+  ) {
+    const quantityPrompt = buildQuantityPickerReply(pendingQuantitySelection, prefersRomanUrdu);
+    return replyDecision(
+      quantityPrompt.text,
+      withPreferredLanguage(
+        {
+          workflow_step: "collecting_items",
+          last_presented_category: `${QUANTITY_PICK_PREFIX}${pendingQuantitySelection.id}`,
+          last_presented_options: [pendingQuantitySelection],
+          last_presented_options_at: new Date().toISOString(),
+        },
+        preferredLanguage,
+      ),
+      trace,
+      quantityPrompt.interactiveList,
+    );
   }
 
   if (removeRequests.length > 0 || matchedAdds.matched.length > 0 || qtyUpdates.length > 0) {
@@ -1952,8 +2275,7 @@ function shouldPromptForStaleDraftChoice(state: ConversationState): boolean {
   const lastActivity = new Date(state.last_processed_user_message_at);
   const now = new Date();
   const ageMs = now.getTime() - lastActivity.getTime();
-  const crossedDateBoundary = now.toISOString().slice(0, 10) !== lastActivity.toISOString().slice(0, 10);
-  return ageMs >= STALE_DRAFT_HOURS * 60 * 60 * 1000 || crossedDateBoundary;
+  return ageMs >= STALE_DRAFT_HOURS * 60 * 60 * 1000;
 }
 
 function getResumeWorkflowStep(state: ConversationState): WorkflowStep {
@@ -3473,7 +3795,7 @@ function parseSelectionWithQty(
   // These are control payloads from interactive lists/flows, not item picks.
   // Let dedicated handlers route them instead of turning them into option numbers.
   if (
-    /^(?:category[_\s-]?(?:option|more)[_\s-]?\d{1,2}|city[_\s-]?option[_\s-]?\d{1,2}|branch[_\s-]?option[_\s-]?\d{1,2}|order[_\s-]?type[_\s-]?(?:delivery|dine[_\s-]?in))$/i.test(
+    /^(?:category[_\s-]?(?:option|more)[_\s-]?\d{1,2}|city[_\s-]?option[_\s-]?\d{1,2}|branch[_\s-]?option[_\s-]?\d{1,2}|order[_\s-]?type[_\s-]?(?:delivery|dine[_\s-]?in)|qty[_\s-]?(?:option|pick)[_\s-]?\d{1,2}|qty[_\s-]?custom|__qty_pick__:(?:\d{1,2}|custom))$/i.test(
       trimmed,
     )
   ) {

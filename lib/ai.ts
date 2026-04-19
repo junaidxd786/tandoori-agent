@@ -21,6 +21,8 @@ const googleClient = process.env.GOOGLE_AI_API_KEY ? new OpenAI({
 const interpretationCache = new Map<string, { result: OrderTurnInterpretation; expires: number }>();
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes for simple intents (increased from 5)
 const COMPLEX_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes for complex intents
+const AI_REQUEST_TIMEOUT_MS = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 15_000;
+const MENU_AI_REQUEST_TIMEOUT_MS = Number(process.env.MENU_AI_REQUEST_TIMEOUT_MS) || 25_000;
 
 function getCacheKey(input: OrderTurnInterpretationInput): string {
   // Create a cache key based on message text and workflow step
@@ -34,6 +36,20 @@ function isSimpleIntent(intent: OrderTurnIntent): boolean {
 function isCacheableIntent(intent: OrderTurnIntent): boolean {
   // Cache more intents aggressively
   return ["confirm_order", "continue_order", "greeting", "chitchat", "unknown", "restart_order", "cancel_order", "browse_menu", "category_question"].includes(intent);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`[ai] ${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export type OrderTurnIntent =
@@ -306,32 +322,36 @@ async function repairOrderInterpretation(
   input: OrderTurnInterpretationInput,
   error: z.ZodError,
 ): Promise<OrderTurnInterpretation | null> {
-    const completion = await openRouterClient.chat.completions.create({
+  const completion = await withTimeout(
+    openRouterClient.chat.completions.create({
       model: process.env.ORDER_AGENT_NLU_MODEL || "openrouter/auto",
       temperature: 0,
       max_tokens: Number(process.env.ORDER_AGENT_NLU_MAX_TOKENS) || 256,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: [
-          "You repair invalid JSON for a restaurant order parser.",
-          "Return JSON only.",
-          "Fix the payload so it satisfies the exact schema and obeys the menu constraints.",
-          "If a value cannot be repaired safely, replace it with null, false, empty array, or unknown as appropriate.",
-          buildOrderInterpreterPrompt(input),
-        ].join("\n"),
-      },
-      {
-        role: "user",
-        content: [
-          `Original invalid JSON: ${rawContent}`,
-          `Validation error: ${validationErrorText(error)}`,
-          'Tool failed: output did not match schema. Try again with valid JSON only.',
-        ].join("\n"),
-      },
-    ],
-  });
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You repair invalid JSON for a restaurant order parser.",
+            "Return JSON only.",
+            "Fix the payload so it satisfies the exact schema and obeys the menu constraints.",
+            "If a value cannot be repaired safely, replace it with null, false, empty array, or unknown as appropriate.",
+            buildOrderInterpreterPrompt(input),
+          ].join("\n"),
+        },
+        {
+          role: "user",
+          content: [
+            `Original invalid JSON: ${rawContent}`,
+            `Validation error: ${validationErrorText(error)}`,
+            'Tool failed: output did not match schema. Try again with valid JSON only.',
+          ].join("\n"),
+        },
+      ],
+    }),
+    AI_REQUEST_TIMEOUT_MS,
+    "NLU repair",
+  );
 
   const repaired = parseJsonObject(completion.choices[0]?.message?.content ?? "{}");
   if (!repaired) return null;
@@ -349,22 +369,26 @@ export async function getOrderTurnInterpretation(
   }
 
   try {
-    const completion = await openRouterClient.chat.completions.create({
-      model: process.env.ORDER_AGENT_NLU_MODEL || "openrouter/auto",
-      temperature: 0.1,
-      max_tokens: Number(process.env.ORDER_AGENT_NLU_MAX_TOKENS) || 256,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: buildOrderInterpreterPrompt(input),
-        },
-        {
-          role: "user",
-          content: input.messageText,
-        },
-      ],
-    });
+    const completion = await withTimeout(
+      openRouterClient.chat.completions.create({
+        model: process.env.ORDER_AGENT_NLU_MODEL || "openrouter/auto",
+        temperature: 0.1,
+        max_tokens: Number(process.env.ORDER_AGENT_NLU_MAX_TOKENS) || 256,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: buildOrderInterpreterPrompt(input),
+          },
+          {
+            role: "user",
+            content: input.messageText,
+          },
+        ],
+      }),
+      AI_REQUEST_TIMEOUT_MS,
+      "NLU parse",
+    );
 
     const rawContent = completion.choices[0]?.message?.content ?? "{}";
     const parsedObject = parseJsonObject(rawContent);
@@ -468,14 +492,33 @@ export async function getCustomerSupportReply(
     }
   }
 
-  const completion = await openRouterClient.chat.completions.create({
-    model: "openrouter/auto",
-    max_tokens: 400,
-    messages,
-  });
+  try {
+    const completion = await withTimeout(
+      openRouterClient.chat.completions.create({
+        model: "openrouter/auto",
+        max_tokens: 400,
+        messages,
+      }),
+      AI_REQUEST_TIMEOUT_MS,
+      "support fallback",
+    );
 
-  const content = completion.choices[0]?.message?.content?.trim();
-  if (!content) {
+    const content = completion.choices[0]?.message?.content?.trim();
+    if (!content) {
+      if (preferredLanguage === "roman_urdu") {
+        return isOpenNow
+          ? "Main menu, prices aur order mein help kar sakta hoon. Batayein aap ko kya chahiye."
+          : "Hum is waqt closed hain, lekin main menu ke bare mein help kar sakta hoon.";
+      }
+
+      return isOpenNow
+        ? "I can help with the menu, prices, and your order. Tell me what you'd like."
+        : "We are currently closed, but I can still help with menu questions.";
+    }
+
+    return content;
+  } catch (error) {
+    console.error("[ai] support fallback failed:", error);
     if (preferredLanguage === "roman_urdu") {
       return isOpenNow
         ? "Main menu, prices aur order mein help kar sakta hoon. Batayein aap ko kya chahiye."
@@ -486,8 +529,6 @@ export async function getCustomerSupportReply(
       ? "I can help with the menu, prices, and your order. Tell me what you'd like."
       : "We are currently closed, but I can still help with menu questions.";
   }
-
-  return content;
 }
 
 export async function processMenuImage(imageUrl: string) {
@@ -581,23 +622,26 @@ function fixMalformedJson(jsonString: string): string | null {
   }
 }
 
-async function createMenuCompletion(client: any, model: string, imageUrl: string) {
+async function createMenuCompletion(client: OpenAI, model: string, imageUrl: string) {
   const clients = [
     { client, model, name: "primary" },
     { client: googleClient, model: "gemini-2.0-flash", name: "google" },
     { client: openRouterClient, model: "google/gemini-2.0-flash-001", name: "openrouter" },
-  ].filter(c => c.client); // Only include clients that exist
+  ].filter(
+    (candidate): candidate is { client: OpenAI; model: string; name: string } => Boolean(candidate.client),
+  ); // Only include clients that exist
 
   for (const { client: currentClient, model: currentModel, name } of clients) {
     try {
       console.log(`[menu/process] Trying ${name} client with model ${currentModel}`);
-      const completion = await currentClient.chat.completions.create({
-        model: currentModel,
-        max_tokens: 4000, // Increased from 2000 to handle larger responses
-        messages: [
-          {
-            role: "system",
-            content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
+      const completion = await withTimeout(
+        currentClient.chat.completions.create({
+          model: currentModel,
+          max_tokens: 4000, // Increased from 2000 to handle larger responses
+          messages: [
+            {
+              role: "system",
+              content: `You are a professional menu digitizer for ${process.env.NEXT_PUBLIC_APP_NAME || "the restaurant"}.
 
 Extract every menu item visible in this image.
 
@@ -608,21 +652,25 @@ Rules:
 4. Return price as a plain number with no currency symbol.
 5. If price is unreadable, return null. Never guess.
 6. Return JSON only in this shape: { "items": [ { "name": "...", "price": 850, "category": "..." } ] }`,
-          },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "Parse this menu image into JSON." },
-              { type: "image_url", image_url: { url: imageUrl } },
-            ],
-          },
-        ],
-        response_format: { type: "json_object" },
-      });
+            },
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Parse this menu image into JSON." },
+                { type: "image_url", image_url: { url: imageUrl } },
+              ],
+            },
+          ],
+          response_format: { type: "json_object" },
+        }),
+        MENU_AI_REQUEST_TIMEOUT_MS,
+        `menu parse (${name})`,
+      );
 
       return completion;
-    } catch (error: any) {
-      console.warn(`[menu/process] ${name} client failed:`, error.message);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Unknown AI client error";
+      console.warn(`[menu/process] ${name} client failed:`, errorMessage);
       if (name === "openrouter" && clients.length === 1) {
         // If this is the last client, rethrow the error
         throw error;

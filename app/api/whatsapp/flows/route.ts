@@ -272,11 +272,7 @@ function buildCompletionParams(input: {
       input.state?.reservation_time ??
       pickString(input.request.data, ["reservation_time", "dine_in_time", "time_slot"]) ??
       null,
-    items: Array.isArray(input.request.data?.items)
-      ? input.request.data?.items
-      : Array.isArray(input.request.data?.cart_items)
-        ? input.request.data?.cart_items
-        : input.state?.cart ?? [],
+    items: pickCompletionItems(input.request.data),
     flow_response_source: "endpoint",
   };
 
@@ -293,6 +289,51 @@ function buildCompletionParams(input: {
   }
 
   return params;
+}
+
+type FlowCompletionItem = {
+  id?: string;
+  name?: string;
+  qty: number;
+};
+
+function pickCompletionItems(data: Record<string, unknown> | undefined): FlowCompletionItem[] {
+  if (!data) return [];
+
+  const candidates = ["selected_items", "items", "order_items"];
+  for (const key of candidates) {
+    const value = data[key];
+    if (!Array.isArray(value) || value.length === 0) continue;
+
+    const sanitized = value
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") return null;
+        const cast = entry as Record<string, unknown>;
+        const name = typeof cast.name === "string" ? cast.name.trim() : null;
+        const id = typeof cast.id === "string" ? cast.id.trim() : null;
+        const qtyRaw =
+          typeof cast.qty === "number"
+            ? cast.qty
+            : typeof cast.quantity === "number"
+              ? cast.quantity
+              : typeof cast.count === "number"
+                ? cast.count
+                : 1;
+        const qty = Number.isFinite(qtyRaw) ? Math.max(1, Math.floor(qtyRaw)) : 1;
+        if (!name && !id) return null;
+        return {
+          ...(id ? { id } : {}),
+          ...(name ? { name } : {}),
+          qty,
+        };
+      })
+      .filter((entry): entry is FlowCompletionItem => Boolean(entry))
+      .slice(0, 12);
+
+    if (sanitized.length > 0) return sanitized;
+  }
+
+  return [];
 }
 
 function isErrorNotificationRequest(request: FlowDataExchangeRequest): boolean {

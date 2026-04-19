@@ -115,7 +115,14 @@ export function parseAddress(raw: string): string | null {
   const normalized = normalizeText(compact);
   const hasHint = ADDRESS_HINTS.some((hint) => normalized.includes(hint));
   const hasNumber = /\d/.test(compact);
-  if (!hasHint || !hasNumber) return null;
+  const tokenCount = normalized.split(" ").filter(Boolean).length;
+  const hasLocationSignal = /\b(city|town|colony|society|area|sector|block|phase|near|opposite)\b/.test(
+    normalized,
+  );
+  const hasSeparator = /[,/.-]/.test(compact);
+
+  if (!hasNumber) return null;
+  if (!hasHint && !(hasLocationSignal && tokenCount >= 3) && !(hasSeparator && tokenCount >= 3)) return null;
   return compact;
 }
 
